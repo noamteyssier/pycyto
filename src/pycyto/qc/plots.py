@@ -1,18 +1,18 @@
-"""Chart inputs for the QC report, per probe barcode and pooled over the run.
+"""Chart inputs every cyto workflow reports.
 
 Everything here is a transformation of a parsed :class:`~pycyto.qc.parse.CytoRun`; the
-report's JavaScript does the drawing.
+report's JavaScript does the drawing. Workflow modules subclass :class:`Plots` and
+:class:`ProbePlots` to add their own charts.
 """
 
-from typing import Self
+from typing import Any, Self
 
 import numpy as np
 import polars as pl
-from pandera.typing.polars import DataFrame
 from pydantic import BaseModel
 
 from ..config import FlexBarcode
-from .parse import CellTable, CytoRun
+from .parse import CytoRun
 
 _LOG_EDGES = np.round(np.arange(0, 6.10, 0.05), 2)
 LOG_BINS = _LOG_EDGES[:-1]
@@ -69,35 +69,25 @@ def rank_curve(umis_desc: np.ndarray, is_cell_desc: np.ndarray, n_points: int = 
     return [(int(r), int(u), round(float(f), 3)) for r, u, f in zip(ranks, umis_desc[ranks - 1], frac)]
 
 
-class CellHists(BaseModel):
-    """Per-cell histograms over some set of called cells.
+def probe_rank_curve(run: CytoRun, probe: str, cell_barcodes: pl.Series | None = None) -> list[RankPoint]:
+    """Barcode-rank curve over every cell barcode under one probe barcode.
 
-    Attributes
+    Parameters
     ----------
-    umi_hist, gene_hist : list[int] or None
-        :func:`log_hist` of UMIs and genes per cell; None when there are no cells.
+    run : CytoRun
+    probe : str
+        A member of ``run.stats.probes``.
+    cell_barcodes : pl.Series or None
+        Barcodes that are called cells, for the curve's cell-fraction shading. None
+        marks every barcode as background.
+
+    Returns
+    -------
+    list[RankPoint]
     """
-
-    umi_hist: list[int] | None
-    gene_hist: list[int] | None
-
-    @classmethod
-    def from_cells(cls, cells: DataFrame[CellTable]) -> Self:
-        """Histograms for a slice of :attr:`CytoRun.cells`.
-
-        Parameters
-        ----------
-        cells : DataFrame[CellTable]
-            All of :attr:`CytoRun.cells`, or a subset of its rows.
-
-        Returns
-        -------
-        CellHists
-        """
-        return cls(
-            umi_hist=log_hist(cells["n_umis"].to_numpy()),
-            gene_hist=log_hist(cells["n_genes"].to_numpy()),
-        )
+    is_cell = pl.lit(False) if cell_barcodes is None else pl.col("barcode").is_in(cell_barcodes.implode())
+    ranked = run.stats.reads.entries[probe].with_columns(is_cell=is_cell).sort("n_umis", descending=True)
+    return rank_curve(ranked["n_umis"].to_numpy(), ranked["is_cell"].to_numpy())
 
 
 class ProbePlots(BaseModel):
@@ -106,30 +96,27 @@ class ProbePlots(BaseModel):
     Attributes
     ----------
     curve : list[RankPoint]
-        Barcode-rank curve over every cell barcode under the probe, from :func:`rank_curve`.
-    hists : CellHists
-        Histograms over the probe's called cells.
+        Barcode-rank curve from :func:`probe_rank_curve`.
     """
 
     curve: list[RankPoint]
-    hists: CellHists
 
 
 class Plots(BaseModel):
     """Every chart input in the report.
 
+    Subclasses redeclare ``probes`` with their :class:`ProbePlots` subclass, add a
+    ``pooled`` field for run-wide charts, and extend ``_fields`` / ``_probe``.
+
     Attributes
     ----------
     log_bins : list[float]
         :data:`LOG_BINS`, so the report can label histogram axes.
-    pooled : CellHists
-        Histograms over every called cell in the run.
     probes : dict[FlexBarcode, ProbePlots]
         Per-probe-barcode plots, in :attr:`CytoStats.probes` order.
     """
 
     log_bins: list[float]
-    pooled: CellHists
     probes: dict[FlexBarcode, ProbePlots]
 
     @classmethod
@@ -144,19 +131,14 @@ class Plots(BaseModel):
         -------
         Plots
         """
-        return cls(
-            log_bins=LOG_BINS.tolist(),
-            pooled=CellHists.from_cells(run.cells),
-            probes={probe: cls._probe(run, probe) for probe in run.stats.probes},
-        )
+        return cls(**cls._fields(run))
 
-    @staticmethod
-    def _probe(run: CytoRun, probe: str) -> ProbePlots:
-        cells = run.cells.filter(pl.col("probe") == probe)
-        ranked = (
-            run.stats.reads.entries[probe]
-            .with_columns(is_cell=pl.col("barcode").is_in(cells["barcode"].implode()))
-            .sort("n_umis", descending=True)
-        )
-        curve = rank_curve(ranked["n_umis"].to_numpy(), ranked["is_cell"].to_numpy())
-        return ProbePlots(curve=curve, hists=CellHists.from_cells(cells))
+    @classmethod
+    def _fields(cls, run: CytoRun) -> dict[str, Any]:
+        """Constructor kwargs; subclasses extend with ``super()._fields(run) | {...}``."""
+        return {"log_bins": LOG_BINS.tolist(), "probes": {probe: cls._probe(run, probe) for probe in run.stats.probes}}
+
+    @classmethod
+    def _probe(cls, run: CytoRun, probe: str) -> ProbePlots:
+        """Plot inputs for one probe barcode; subclasses return their :class:`ProbePlots` subclass."""
+        return ProbePlots(curve=probe_rank_curve(run, probe))

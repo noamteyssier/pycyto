@@ -7,7 +7,7 @@ import logging
 import os
 from functools import cached_property
 from pathlib import Path
-from typing import Self
+from typing import Literal, Self
 
 import anndata as ad
 import numpy as np
@@ -19,6 +19,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     TypeAdapter,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -34,9 +35,15 @@ logger = logging.getLogger("pycyto.qc")
 _FLEX_V1_RANK = {bc: i for i, bc in enumerate(sorted(FLEX_V1_BARCODES))}
 _FLEX_V2_RANK = {bc: i for i, bc in enumerate(FLEX_V2_BARCODES)}
 
+Workflow = Literal["gex", "crispr"]
+"""The cyto workflows the report supports, named as in ``mapping_lib.json``."""
+
+FEATURE: dict[Workflow, str] = {"gex": "gene probe", "crispr": "guide"}
+"""What a read failing ``missing_feature`` did not match, per workflow."""
+
 # unmapped-read categories in ``stats/mapping_map.json`` -> human-readable labels
 UNMAPPED_LABELS = {
-    "missing_feature": "No gene probe match",
+    "missing_feature": "No feature match",  # replaced with the workflow's FEATURE when known
     "missing_probe": "No probe barcode match",
     "failed_umi_qual": "UMI failed quality",
     "missing_whitelist": "Cell barcode not in whitelist",
@@ -246,15 +253,22 @@ class MappingStats(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _pair_unmapped(cls, data):
-        """Turn cyto's flat ``{reason: reads, reason_frac: frac}`` block into reasons."""
+    def _pair_unmapped(cls, data, info: ValidationInfo):
+        """Turn cyto's flat ``{reason: reads, reason_frac: frac}`` block into reasons.
+
+        Pass ``context={"feature": ...}`` (see :meth:`from_json`) to label ``missing_feature``
+        with what the workflow maps reads against.
+        """
         if not (isinstance(data, dict) and isinstance(raw := data.get("unmapped"), dict)):
             return data
+        labels = dict(UNMAPPED_LABELS)
+        if feature := (info.context or {}).get("feature"):
+            labels["missing_feature"] = f"No {feature} match"
         total = data.get("total_reads")
         reasons = [
             {
                 "reason": key,
-                "label": UNMAPPED_LABELS.get(key, key.replace("_", " ")),
+                "label": labels.get(key, key.replace("_", " ")),
                 "reads": reads,
                 "frac_of_reads": reads / total if total else None,
                 "frac_of_unmapped": raw[f"{key}_frac"],
@@ -269,19 +283,22 @@ class MappingStats(BaseModel):
         return next((r.reads for r in self.unmapped if r.reason == reason), None)
 
     @classmethod
-    def from_json(cls, path: str) -> Self:
+    def from_json(cls, path: str, feature: str | None = None) -> Self:
         """Read and validate ``mapping_map.json``.
 
         Parameters
         ----------
         path : str
             Path to the JSON file.
+        feature : str, optional
+            What the workflow maps reads against (see :data:`FEATURE`), used to label the
+            ``missing_feature`` unmapped reason.
 
         Returns
         -------
         MappingStats
         """
-        return cls.model_validate_json(Path(path).read_bytes())
+        return cls.model_validate_json(Path(path).read_bytes(), context={"feature": feature})
 
 
 class Library(BaseModel):
@@ -330,6 +347,46 @@ class Libraries(BaseModel):
         """
         libraries = TypeAdapter(list[Library]).validate_json(Path(path).read_bytes())
         return cls(entries={lib.name: lib for lib in libraries})
+
+    @property
+    def workflow(self) -> Workflow:
+        """The cyto workflow, from which feature library was mapped against.
+
+        Raises
+        ------
+        ValueError
+            If neither a ``gex`` nor a ``crispr`` library is present.
+        """
+        for workflow in FEATURE:
+            if workflow in self.entries:
+                return workflow
+        raise ValueError(
+            f"Can't tell which cyto workflow produced this directory (libraries: {sorted(self.entries)}); "
+            "expected a `cyto workflow gex` or `cyto workflow crispr` run"
+        )
+
+
+def _scan_h5ad(path: str, chunk_rows: int) -> tuple[list[str], np.ndarray, np.ndarray, list[str]]:
+    """Scan a cyto count h5ad in row chunks from a backed AnnData so memory stays bounded.
+
+    Returns the cell barcodes (cyto's ``-<probe>`` suffix stripped), features with a
+    nonzero count per barcode, summed counts per feature, and the feature names.
+    """
+    adata = ad.read_h5ad(path, backed="r")
+    try:
+        n_features = np.zeros(adata.n_obs, dtype=np.int64)
+        totals = np.zeros(adata.n_vars, dtype=np.float64)
+        for start in range(0, adata.n_obs, chunk_rows):
+            block = sp.csr_matrix(adata.X[start : start + chunk_rows])
+            block.eliminate_zeros()
+            n_features[start : start + block.shape[0]] = np.diff(block.indptr)
+            totals += np.asarray(block.sum(axis=0)).ravel()
+        # cyto names cells ``<barcode>-<probe>`` (e.g. ``ACGT...-A-A02``)
+        barcodes = [name.split("-", 1)[0] for name in adata.obs_names]
+        names = adata.var_names.tolist()
+    finally:
+        adata.file.close()
+    return barcodes, n_features, totals, names
 
 
 class CellCounts(pa.DataFrameModel):
@@ -393,19 +450,7 @@ class FilteredCounts(BaseModel):
         -------
         FilteredCounts
         """
-        adata = ad.read_h5ad(path, backed="r")
-        try:
-            n_genes = np.zeros(adata.n_obs, dtype=np.int64)
-            totals = np.zeros(adata.n_vars, dtype=np.float64)
-            for start in range(0, adata.n_obs, chunk_rows):
-                block = sp.csr_matrix(adata.X[start : start + chunk_rows])
-                block.eliminate_zeros()
-                n_genes[start : start + block.shape[0]] = np.diff(block.indptr)
-                totals += np.asarray(block.sum(axis=0)).ravel()
-            # cyto names cells ``<barcode>-<probe>`` (e.g. ``ACGT...-A-A02``)
-            barcodes = [name.split("-", 1)[0] for name in adata.obs_names]
-        finally:
-            adata.file.close()
+        barcodes, n_genes, totals, _ = _scan_h5ad(path, chunk_rows)
         cells = pl.DataFrame({"barcode": barcodes, "n_genes": n_genes}).cast({"barcode": pl.Categorical})
         return cls(cells=cells, feature_totals=totals)
 
@@ -439,7 +484,7 @@ class CytoStats(BaseModel):
         Parameters
         ----------
         cyto_outdir : str
-            A ``cyto workflow gex`` output directory containing ``stats/``.
+            A cyto output directory containing ``stats/``.
 
         Returns
         -------
@@ -449,12 +494,15 @@ class CytoStats(BaseModel):
         ------
         pydantic.ValidationError
             If any JSON file is malformed or a probe name is not a known Flex barcode.
+        ValueError
+            If the workflow cannot be told from ``mapping_lib.json``.
         """
         root = os.path.join(cyto_outdir, "stats")
+        library = Libraries.from_json(os.path.join(root, "mapping_lib.json"))
         reads = ReadStats.from_dir(os.path.join(root, "reads"))
         return cls(
-            mapping=MappingStats.from_json(os.path.join(root, "mapping_map.json")),
-            library=Libraries.from_json(os.path.join(root, "mapping_lib.json")),
+            mapping=MappingStats.from_json(os.path.join(root, "mapping_map.json"), feature=FEATURE[library.workflow]),
+            library=library,
             reads=reads,
             umi=UmiStats.from_dir(os.path.join(root, "umi"), reads.probes),
         )
@@ -465,29 +513,13 @@ class CytoStats(BaseModel):
         return self.reads.probes
 
     @property
-    def workflow(self) -> str:
-        """The cyto workflow that produced this directory.
-
-        Returns
-        -------
-        str
-            Currently always ``"gex"``.
-
-        Raises
-        ------
-        ValueError
-            If no ``gex`` library is present in ``mapping_lib.json``.
-        """
-        if "gex" in self.library.entries:
-            return "gex"
-        raise ValueError(
-            f"Can't tell which cyto workflow produced this directory (libraries: {sorted(self.library.entries)}); "
-            "expected a `cyto workflow gex` run"
-        )
+    def workflow(self) -> Workflow:
+        """The cyto workflow that produced this directory; see :attr:`Libraries.workflow`."""
+        return self.library.workflow
 
 
 class CellTable(pa.DataFrameModel):
-    """Schema for :attr:`CytoRun.cells`: every called cell in a run, one row each.
+    """Schema for :attr:`GexRun.cells`: every called cell in a run, one row each.
 
     Attributes
     ----------
@@ -514,7 +546,10 @@ class CellTable(pa.DataFrameModel):
 
 
 class CytoRun(BaseModel):
-    """A ``cyto workflow gex`` output directory.
+    """A cyto output directory: the shared ``stats/`` plus whatever the workflow writes.
+
+    :class:`GexRun` and :class:`CrisprRun` add the workflow's count files; this base
+    holds what every workflow has.
 
     Attributes
     ----------
@@ -522,15 +557,26 @@ class CytoRun(BaseModel):
         Absolute path to the directory.
     stats : CytoStats
         Everything under ``stats/``.
-    counts : dict[FlexBarcode, FilteredCounts]
-        Filtered count summaries for the probe barcodes that have a
-        ``counts/<probe>.filt.h5ad``, in :attr:`CytoStats.probes` order. Probe barcodes
-        without one have no called cells.
     """
 
     path: str
     stats: CytoStats
-    counts: dict[FlexBarcode, FilteredCounts]
+
+    @classmethod
+    def from_stats(cls, cyto_outdir: str, stats: CytoStats) -> Self:
+        """Build the run from already-loaded stats; subclasses also read their count files.
+
+        Parameters
+        ----------
+        cyto_outdir : str
+            The output directory ``stats`` was read from.
+        stats : CytoStats
+
+        Returns
+        -------
+        CytoRun
+        """
+        return cls(path=os.path.abspath(cyto_outdir), stats=stats)
 
     @classmethod
     def read(cls, cyto_outdir: str) -> Self:
@@ -539,13 +585,30 @@ class CytoRun(BaseModel):
         Parameters
         ----------
         cyto_outdir : str
-            A ``cyto workflow gex`` output directory.
+            A cyto output directory.
 
         Returns
         -------
         CytoRun
         """
-        stats = CytoStats.read(cyto_outdir)
+        return cls.from_stats(cyto_outdir, CytoStats.read(cyto_outdir))
+
+
+class GexRun(CytoRun):
+    """A ``cyto workflow gex`` output directory.
+
+    Attributes
+    ----------
+    counts : dict[FlexBarcode, FilteredCounts]
+        Filtered count summaries for the probe barcodes that have a
+        ``counts/<probe>.filt.h5ad``, in :attr:`CytoStats.probes` order. Probe barcodes
+        without one have no called cells.
+    """
+
+    counts: dict[FlexBarcode, FilteredCounts]
+
+    @classmethod
+    def from_stats(cls, cyto_outdir: str, stats: CytoStats) -> Self:
         paths = {p: os.path.join(cyto_outdir, "counts", f"{p}.filt.h5ad") for p in stats.probes}
         return cls(
             path=os.path.abspath(cyto_outdir),
@@ -573,3 +636,39 @@ class CytoRun(BaseModel):
                 logger.warning(f"[{probe}] - {missing} filtered barcodes missing from reads stats")
             tables.append(cells.with_columns(probe=pl.lit(probe)))
         return CellTable.validate(pl.concat([pl.DataFrame(schema=dtypes), *tables], how="diagonal"))
+
+
+class CrisprRun(CytoRun):
+    """A ``cyto workflow crispr`` output directory.
+
+    A CRISPR run has no cell calls: ``counts/<probe>.h5ad`` holds guide UMIs for every
+    barcode. Only the per-guide totals are kept, not the matrices. Guide assignments
+    (``assignments/``) are not read.
+
+    Attributes
+    ----------
+    guide_names : list[str]
+        Guides in the library, in ``var`` order. Every probe's count file shares this list.
+    guide_umis : dict[FlexBarcode, np.ndarray]
+        UMIs per guide summed over every barcode, per probe barcode, in
+        :attr:`CytoStats.probes` order.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    guide_names: list[str]
+    guide_umis: dict[FlexBarcode, np.ndarray]
+
+    @classmethod
+    def from_stats(cls, cyto_outdir: str, stats: CytoStats) -> Self:
+        names: list[str] = []
+        umis = {}
+        for probe in stats.probes:
+            _, _, totals, names = _scan_h5ad(os.path.join(cyto_outdir, "counts", f"{probe}.h5ad"), chunk_rows=10_000)
+            umis[probe] = totals
+        return cls(path=os.path.abspath(cyto_outdir), stats=stats, guide_names=names, guide_umis=umis)
+
+    @cached_property
+    def guide_totals(self) -> np.ndarray:
+        """UMIs per guide summed over every probe barcode, in :attr:`guide_names` order."""
+        return np.sum(list(self.guide_umis.values()), axis=0)
