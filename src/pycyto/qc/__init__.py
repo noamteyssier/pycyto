@@ -8,7 +8,7 @@ import logging
 import os
 from importlib.metadata import version
 
-from .metrics import ProbeMetrics, SummaryMetrics
+from .metrics import ProbeMetrics, ProbePlots, SummaryMetrics
 from .parse import CytoRun
 from .render import render_html, write_csvs
 
@@ -18,7 +18,7 @@ logger = logging.getLogger("pycyto.qc")
 
 
 def collect(cyto_outdir: str, title: str | None = None) -> dict:
-    """Compute every metric for the report; returns the report payload."""
+    """Compute every metric and plot input for the report; returns the report payload."""
     run = CytoRun.read(cyto_outdir)
     logger.info(f"Computing QC for a cyto {run.stats.workflow} run with {len(run.stats.probes)} probe barcodes")
     probes = [ProbeMetrics.compute(run, probe) for probe in run.stats.probes]
@@ -29,6 +29,7 @@ def collect(cyto_outdir: str, title: str | None = None) -> dict:
         "version": version("pycyto"),
         "summary": SummaryMetrics.compute(run, probes).model_dump(),
         "probes": [p.model_dump() for p in probes],
+        "plots": {probe: ProbePlots.compute(run, probe).model_dump() for probe in run.stats.probes},
     }
 
 
