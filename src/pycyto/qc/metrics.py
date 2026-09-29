@@ -11,9 +11,31 @@ from pydantic import BaseModel
 
 from .parse import CytoRun
 
+LOG_BINS = np.round(np.arange(0, 6.05, 0.05), 2)
+"""log10 bin edges (width 0.05) for the histograms embedded in the report."""
+
 
 def _div(a, b) -> float | None:
     return a / b if a is not None and b else None
+
+
+def log_hist(values: np.ndarray) -> list[int] | None:
+    """Histogram of ``log10(values)`` over :data:`LOG_BINS`.
+
+    Parameters
+    ----------
+    values : np.ndarray
+        Positive counts; values below 1 are clamped to 1.
+
+    Returns
+    -------
+    list[int] or None
+        One count per bin, or None when ``values`` is empty.
+    """
+    if len(values) == 0:
+        return None
+    counts, _ = np.histogram(np.log10(np.maximum(values, 1)), bins=np.append(LOG_BINS, 6.05))
+    return counts.tolist()
 
 
 def rank_curve(umis_desc: np.ndarray, is_cell_desc: np.ndarray, n_points: int = 300) -> list:
@@ -202,9 +224,13 @@ class ProbePlots(BaseModel):
     ----------
     curve : list[tuple[int, int, float]]
         Barcode-rank curve from :func:`rank_curve`: ``(rank, umis, cell fraction)`` points.
+    umi_hist, gene_hist : list[int] or None
+        :func:`log_hist` of UMIs and genes per called cell; None when the probe has no cells.
     """
 
     curve: list[tuple[int, int, float]]
+    umi_hist: list[int] | None
+    gene_hist: list[int] | None
 
     @classmethod
     def compute(cls, run: CytoRun, probe: str) -> Self:
@@ -220,10 +246,45 @@ class ProbePlots(BaseModel):
         -------
         ProbePlots
         """
-        cell_barcodes = run.cells.filter(pl.col("probe") == probe)["barcode"]
+        cells = run.cells.filter(pl.col("probe") == probe)
         ranked = (
             run.stats.reads.entries[probe]
-            .with_columns(is_cell=pl.col("barcode").is_in(cell_barcodes.implode()))
+            .with_columns(is_cell=pl.col("barcode").is_in(cells["barcode"].implode()))
             .sort("n_umis", descending=True)
         )
-        return cls(curve=rank_curve(ranked["n_umis"].to_numpy(), ranked["is_cell"].to_numpy()))
+        return cls(
+            curve=rank_curve(ranked["n_umis"].to_numpy(), ranked["is_cell"].to_numpy()),
+            umi_hist=log_hist(cells["n_umis"].to_numpy()),
+            gene_hist=log_hist(cells["n_genes"].to_numpy()),
+        )
+
+
+class PooledPlots(BaseModel):
+    """Run-wide plot inputs, pooled over every probe barcode.
+
+    Attributes
+    ----------
+    umi_hist, gene_hist : list[int] or None
+        :func:`log_hist` of UMIs and genes per called cell across the run; None when
+        the run has no cells.
+    """
+
+    umi_hist: list[int] | None
+    gene_hist: list[int] | None
+
+    @classmethod
+    def compute(cls, run: CytoRun) -> Self:
+        """Pooled plot inputs for a run.
+
+        Parameters
+        ----------
+        run : CytoRun
+
+        Returns
+        -------
+        PooledPlots
+        """
+        return cls(
+            umi_hist=log_hist(run.cells["n_umis"].to_numpy()),
+            gene_hist=log_hist(run.cells["n_genes"].to_numpy()),
+        )

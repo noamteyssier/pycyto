@@ -8,7 +8,7 @@ import logging
 import os
 from importlib.metadata import version
 
-from .metrics import ProbeMetrics, ProbePlots, SummaryMetrics
+from .metrics import LOG_BINS, PooledPlots, ProbeMetrics, ProbePlots, SummaryMetrics
 from .parse import CytoRun
 from .render import render_html, write_csvs
 
@@ -30,6 +30,8 @@ def collect(cyto_outdir: str, title: str | None = None) -> dict:
         "summary": SummaryMetrics.compute(run, probes).model_dump(),
         "probes": [p.model_dump() for p in probes],
         "plots": {probe: ProbePlots.compute(run, probe).model_dump() for probe in run.stats.probes},
+        "pooled": PooledPlots.compute(run).model_dump(),
+        "log_bins": LOG_BINS.tolist(),
     }
 
 
