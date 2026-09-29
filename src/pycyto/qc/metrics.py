@@ -6,14 +6,40 @@ Workflow-specific metrics live in :mod:`pycyto.qc.gex`.
 import os
 from typing import Any
 
+import anndata as ad
 import numpy as np
 import polars as pl
+import scipy.sparse as sp
 
 from .parse import load_json, read_barcode_stats
 
 
 def _div(a, b) -> float | None:
     return a / b if a is not None and b else None
+
+
+def read_counts(path: str, chunk_rows: int = 10_000) -> tuple[pl.DataFrame, np.ndarray, list[str]]:
+    """Scan a cyto count h5ad.
+
+    Returns a ``barcode, n_features`` frame (features with nonzero counts per barcode),
+    the per-feature count totals, and the feature names. ``X`` is read in row chunks
+    from a backed AnnData so memory stays bounded.
+    """
+    adata = ad.read_h5ad(path, backed="r")
+    try:
+        n_features = np.zeros(adata.n_obs, dtype=np.int64)
+        totals = np.zeros(adata.n_vars, dtype=np.float64)
+        for start in range(0, adata.n_obs, chunk_rows):
+            block = sp.csr_matrix(adata.X[start : start + chunk_rows])
+            block.eliminate_zeros()
+            n_features[start : start + block.shape[0]] = np.diff(block.indptr)
+            totals += np.asarray(block.sum(axis=0)).ravel()
+        # cyto names cells ``<barcode>-<probe>`` (e.g. ``ACGT...-A-A02``)
+        barcodes = [name.split("-", 1)[0] for name in adata.obs_names]
+        names = adata.var_names.tolist()
+    finally:
+        adata.file.close()
+    return pl.DataFrame({"barcode": barcodes, "n_features": n_features}), totals, names
 
 
 def probe_basics(cyto_outdir: str, probe: str) -> tuple[pl.DataFrame, dict[str, Any], tuple[int, int]]:

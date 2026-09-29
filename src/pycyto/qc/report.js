@@ -1,8 +1,8 @@
 "use strict";
 
 // Shared report engine for every cyto workflow. All numbers, flags and labels are computed
-// in Python (pycyto.qc); this file only draws them. What differs between workflows (so far just
-// the header subtitle) lives in report_<workflow>.js, which defines
+// in Python (pycyto.qc); this file only draws them. What differs between workflows (headline
+// metrics, summary rows) lives in report_<workflow>.js, which defines
 // `WORKFLOW` (see the WorkflowConfig typedef below); report.html then calls main().
 const D = JSON.parse(document.getElementById("data").textContent);
 const S = D.summary;
@@ -12,6 +12,9 @@ const $$ = (sel) => [...document.querySelectorAll(sel)];
 /**
  * @typedef {object} WorkflowConfig
  * @property {string} subtitle                  shown in the header
+ * @property {() => Array} hero                 [value, label] headline numbers
+ * @property {string} summaryTitle              title of the second summary table
+ * @property {() => Array} summaryRows          [label, value, tooltip?] rows for it
  */
 
 // ============================================================================
@@ -72,6 +75,7 @@ function drawHeader() {
 }
 
 function drawSummary() {
+  setHTML("#hero", WORKFLOW.hero().map(([v, label]) => html`<div class="card hero"><div class="value">${v}</div><div class="label">${label}</div></div>`));
   const inLibrary = S.probe_barcodes_in_library ? ` / ${fmt.int(S.probe_barcodes_in_library)} in library` : "";
   kvTable("#kv-sequencing", [
     ["Number of reads", fmt.int(S.total_reads)],
@@ -80,6 +84,8 @@ function drawSummary() {
     ["UMIs corrected", fmt.pct2(S.umi_corrected_frac)],
     ["Probe barcodes with reads", `${fmt.int(S.probe_barcodes_with_reads)}${inLibrary}`],
   ]);
+  $("#kv-workflow-title").textContent = WORKFLOW.summaryTitle;
+  kvTable("#kv-workflow", WORKFLOW.summaryRows());
 }
 
 // ============================================================================
