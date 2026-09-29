@@ -28,6 +28,15 @@ logger = logging.getLogger("pycyto.qc")
 _FLEX_V1_RANK = {bc: i for i, bc in enumerate(sorted(FLEX_V1_BARCODES))}
 _FLEX_V2_RANK = {bc: i for i, bc in enumerate(FLEX_V2_BARCODES)}
 
+# unmapped-read categories in ``stats/mapping_map.json`` -> human-readable labels
+UNMAPPED_LABELS = {
+    "missing_feature": "No gene probe match",
+    "missing_probe": "No probe barcode match",
+    "failed_umi_qual": "UMI failed quality",
+    "missing_whitelist": "Cell barcode not in whitelist",
+    "umi_truncated": "UMI truncated",
+}
+
 
 class BarcodeReadStats(pa.DataFrameModel):
     """Schema for one ``stats/reads/<probe>.reads.tsv.zst`` table.
@@ -196,11 +205,16 @@ class MappingStats(BaseModel):
         Reads with a valid cell barcode, probe barcode, UMI and feature match.
     mapped_reads_frac : float
         ``mapped_reads / total_reads``.
+    unmapped : dict[str, int or float]
+        Why reads failed to map: ``<reason>`` -> read count and ``<reason>_frac`` ->
+        fraction of unmapped reads, for the reasons in :data:`UNMAPPED_LABELS`. A read
+        can fail more than one check.
     """
 
     total_reads: int
     mapped_reads: int
     mapped_reads_frac: float
+    unmapped: dict[str, int | float]
 
     @classmethod
     def from_json(cls, path: str) -> Self:
