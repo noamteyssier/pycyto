@@ -5,7 +5,8 @@ Everything here is a transformation of a parsed :class:`~pycyto.qc.parse.CytoRun
 ``collect`` calls its ``compute``. Workflow subclasses of the metric models add their own
 fields and override ``compute`` to build the base model and extend it:
 ``cls(**Base.compute(...).model_dump(), extra=...)``. Chart inputs live in
-:mod:`pycyto.qc.plots`, alert rules in :mod:`pycyto.qc.alerts`.
+:mod:`pycyto.qc.plots`, alert rules in :mod:`pycyto.qc.alerts`, cutoffs in
+:mod:`pycyto.qc.thresholds`.
 """
 
 from typing import Self
@@ -14,6 +15,7 @@ import numpy as np
 from pydantic import BaseModel
 
 from .parse import BarcodeReadStats, CellTable, CrisprCytoRun, CytoRun, GexCytoRun
+from .thresholds import THRESH, Level
 
 
 def safe_div(a, b) -> float | None:
@@ -31,15 +33,31 @@ class ProbeMetrics(BaseModel):
     ----------
     probe : str
         Probe barcode.
+    n_barcodes : int
+        Cell barcodes seen under this probe barcode (rows of its reads table).
     mapped_reads : int
         Mapped reads under this probe barcode, over all cell barcodes.
     umis : int
         Deduplicated UMIs under this probe barcode, over all cell barcodes.
+    frac_of_mapped_reads : float or None
+        ``mapped_reads`` / mapped reads over every probe barcode.
+    seq_saturation : float or None
+        ``1 - umis / mapped_reads``.
+    umi_corrected_frac : float
+        Fraction of UMIs collapsed by error correction, from ``stats/umi``.
+    flag : Level or None
+        Per-probe-barcode status shown as a dot in the report; None when there is nothing
+        to judge. Set by workflows that have a per-probe verdict (GEX).
     """
 
     probe: str
+    n_barcodes: int
     mapped_reads: int
     umis: int
+    frac_of_mapped_reads: float | None
+    seq_saturation: float | None
+    umi_corrected_frac: float
+    flag: Level | None = None
 
     @classmethod
     def compute(cls, run: CytoRun, probe: str) -> Self:
@@ -56,7 +74,17 @@ class ProbeMetrics(BaseModel):
         ProbeMetrics
         """
         reads = run.stats.reads.entries[probe]
-        return cls(probe=probe, mapped_reads=reads[BarcodeReadStats.n_reads].sum(), umis=reads[BarcodeReadStats.n_umis].sum())
+        mapped = int(reads[BarcodeReadStats.n_reads].sum())
+        umis = int(reads[BarcodeReadStats.n_umis].sum())
+        return cls(
+            probe=probe,
+            n_barcodes=reads.height,
+            mapped_reads=mapped,
+            umis=umis,
+            frac_of_mapped_reads=safe_div(mapped, run.stats.reads.mapped_reads),
+            seq_saturation=1 - umis / mapped if mapped else None,
+            umi_corrected_frac=run.stats.umi.entries[probe].fraction_corrected,
+        )
 
 
 class SummaryMetrics(BaseModel):
@@ -167,32 +195,65 @@ class GexProbeMetrics(ProbeMetrics):
 
     Attributes
     ----------
+    has_filtered_h5ad : bool
+        Whether cyto wrote ``counts/<probe>.filt.h5ad``; without it the probe has no cells.
     cells : int
         Called cells.
     reads_in_cells : int
         Mapped reads belonging to called cells.
-    frac_reads_in_cells : float or None
-        ``reads_in_cells / mapped_reads``.
-    median_umis_per_cell : float or None
-        Median UMIs over called cells; None when the probe has no cells.
+    frac_reads_in_cells, frac_umis_in_cells : float or None
+        Reads / UMIs in called cells as a fraction of the probe's ``mapped_reads`` / ``umis``.
+    mean_reads_per_cell : float or None
+        ``mapped_reads / cells``.
+    median_umis_per_cell, median_genes_per_cell : float or None
+        Medians over called cells; None when the probe has no cells.
+    total_genes_detected : int or None
+        Features with a nonzero total over the probe's called cells; None without a filtered h5ad.
+    flag : Level or None
+        None without cells; ``warn`` when the median UMIs per cell or the fraction of reads
+        in cells is below :class:`~pycyto.qc.thresholds.GexThresholds`; ``ok`` otherwise.
     """
 
+    has_filtered_h5ad: bool
     cells: int
     reads_in_cells: int
     frac_reads_in_cells: float | None
+    frac_umis_in_cells: float | None
+    mean_reads_per_cell: float | None
     median_umis_per_cell: float | None
+    median_genes_per_cell: float | None
+    total_genes_detected: int | None
 
     @classmethod
     def compute(cls, run: GexCytoRun, probe: str) -> Self:
         base = ProbeMetrics.compute(run, probe)
+        counts = run.counts.get(probe)
         in_cells = run.cells_by_probe[probe]
-        reads_in_cells = in_cells[CellTable.n_reads].sum()
+        cells = in_cells.height
+        reads_in_cells = int(in_cells[CellTable.n_reads].sum())
+        frac_reads_in_cells = safe_div(reads_in_cells, base.mapped_reads)
+        median_umis_per_cell = in_cells[CellTable.n_umis].median()
+        thresh = THRESH.gex
+        if cells == 0:
+            flag = None
+        elif median_umis_per_cell < thresh.median_umis_per_cell or (
+            frac_reads_in_cells is not None and frac_reads_in_cells < thresh.frac_reads_in_cells.error
+        ):
+            flag = "warn"
+        else:
+            flag = "ok"
         return cls(
-            **base.model_dump(),
-            cells=in_cells.height,
+            **base.model_dump(exclude={"flag"}),
+            flag=flag,
+            has_filtered_h5ad=counts is not None,
+            cells=cells,
             reads_in_cells=reads_in_cells,
-            frac_reads_in_cells=safe_div(reads_in_cells, base.mapped_reads),
-            median_umis_per_cell=in_cells[CellTable.n_umis].median(),
+            frac_reads_in_cells=frac_reads_in_cells,
+            frac_umis_in_cells=safe_div(in_cells[CellTable.n_umis].sum(), base.umis),
+            mean_reads_per_cell=safe_div(base.mapped_reads, cells),
+            median_umis_per_cell=median_umis_per_cell,
+            median_genes_per_cell=in_cells[CellTable.n_genes].median(),
+            total_genes_detected=int((counts.feature_totals > 0).sum()) if counts else None,
         )
 
 
@@ -287,8 +348,25 @@ class GexMetrics(Metrics):
 
 
 # ============================================================================
-# CRISPR (per-probe metrics are the shared ProbeMetrics)
+# CRISPR
 # ============================================================================
+class CrisprProbeMetrics(ProbeMetrics):
+    """Per-probe-barcode metrics for a CRISPR run.
+
+    Attributes
+    ----------
+    guides_detected : int
+        Guides with at least one UMI under this probe barcode.
+    """
+
+    guides_detected: int
+
+    @classmethod
+    def compute(cls, run: CrisprCytoRun, probe: str) -> Self:
+        base = ProbeMetrics.compute(run, probe)
+        return cls(**base.model_dump(), guides_detected=int((run.guide_umis[probe] > 0).sum()))
+
+
 class CrisprSummaryMetrics(SummaryMetrics):
     """Run-level metrics for a CRISPR run.
 
@@ -341,14 +419,14 @@ class CrisprMetrics(Metrics):
 
     Attributes
     ----------
-    probes : list[ProbeMetrics]
-        The shared per-probe metrics; CRISPR adds none of its own yet.
+    probes : list[CrisprProbeMetrics]
     summary : CrisprSummaryMetrics
     """
 
+    probes: list[CrisprProbeMetrics]
     summary: CrisprSummaryMetrics
 
     @classmethod
     def compute(cls, run: CrisprCytoRun) -> Self:
-        probes = [ProbeMetrics.compute(run, probe) for probe in run.stats.probes]
+        probes = [CrisprProbeMetrics.compute(run, probe) for probe in run.stats.probes]
         return cls(probes=probes, summary=CrisprSummaryMetrics.compute(run, probes))

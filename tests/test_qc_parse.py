@@ -36,7 +36,7 @@ class TestParsers:
 
 
 def test_umi_stats_keys_must_be_flex_barcodes():
-    umi = ProbeUmiStats(total=10, corrected=1)
+    umi = ProbeUmiStats(total=10, corrected=1, fraction_corrected=0.1)
     assert set(UmiStats(entries={"BC001": umi, "A-A01": umi, "A_A01": umi}).entries) == {"BC001", "A-A01", "A_A01"}
     with pytest.raises(ValidationError, match="BC017"):
         UmiStats(entries={"BC001": umi, "BC017": umi})

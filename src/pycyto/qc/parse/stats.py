@@ -1,6 +1,7 @@
 """Models for everything cyto writes under ``<cyto_outdir>/stats``."""
 
 import os
+from functools import cached_property
 from pathlib import Path
 from typing import Literal, Self
 
@@ -129,6 +130,15 @@ class ReadStats(BaseModel):
         """Probe barcodes with a reads table, in :attr:`entries` order."""
         return list(self.entries)
 
+    @cached_property
+    def mapped_reads(self) -> int:
+        """Mapped reads over every probe barcode: ``n_reads`` summed over all tables.
+
+        Differs slightly from ``mapping_map.json``'s ``mapped_reads``; use this when
+        normalising per-probe-barcode counts so the fractions sum to one.
+        """
+        return sum(int(t[BarcodeReadStats.n_reads].sum()) for t in self.entries.values())
+
 
 class ProbeUmiStats(BaseModel):
     """One ``stats/umi/<probe>.umi.json`` file: UMI error-correction counts for a probe barcode.
@@ -139,10 +149,13 @@ class ProbeUmiStats(BaseModel):
         UMIs observed under this probe barcode before correction.
     corrected : int
         UMIs that were collapsed onto a neighbour by error correction.
+    fraction_corrected : float
+        ``corrected / total``, as reported by cyto.
     """
 
     total: int
     corrected: int
+    fraction_corrected: float
 
     @classmethod
     def from_json(cls, path: str) -> Self:
