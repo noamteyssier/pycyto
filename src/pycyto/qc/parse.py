@@ -3,7 +3,9 @@
 They assume a completed cyto run: every file is present and well-formed.
 """
 
+import logging
 import os
+from functools import cached_property
 from pathlib import Path
 from typing import Self
 
@@ -16,6 +18,8 @@ from pandera.typing.polars import DataFrame
 from pydantic import BaseModel, ConfigDict, TypeAdapter, field_validator
 
 from ..config import FLEX_V1_BARCODES, FLEX_V2_BARCODES, FlexBarcode
+
+logger = logging.getLogger("pycyto.qc")
 
 # Rank of each known barcode within its format, so `ReadStats._probe_sort_key` groups by prefix
 # (V1) or plate position (V2). FLEX_V1_BARCODES is generated prefix-interleaved
@@ -455,3 +459,25 @@ class CytoRun(BaseModel):
             stats=stats,
             counts={p: FilteredCounts.from_h5ad(f) for p, f in paths.items() if os.path.exists(f)},
         )
+
+    @cached_property
+    def cells(self) -> pl.DataFrame:
+        """Every called cell in the run, one row each.
+
+        A cell is a barcode in a probe's :class:`FilteredCounts` that also appears in that
+        probe's reads table. Called cells missing from the reads table are dropped with a
+        warning. Computed once on first access.
+
+        Returns
+        -------
+        pl.DataFrame
+            Columns ``probe, barcode, n_umis, n_reads, n_genes``.
+        """
+        schema = {"probe": pl.String, "barcode": pl.Categorical, "n_umis": pl.Int64, "n_reads": pl.Int64, "n_genes": pl.Int64}
+        tables = []
+        for probe, counts in self.counts.items():
+            cells = counts.cells.join(self.stats.reads.entries[probe], on="barcode", how="inner")
+            if (missing := counts.cells.height - cells.height) > 0:
+                logger.warning(f"[{probe}] - {missing} filtered barcodes missing from reads stats")
+            tables.append(cells.with_columns(probe=pl.lit(probe)))
+        return pl.concat([pl.DataFrame(schema=schema), *tables], how="diagonal")
