@@ -3,7 +3,6 @@
 Everything here is a transformation of a parsed :class:`~pycyto.qc.parse.CytoRun`.
 """
 
-import logging
 from typing import Self
 
 import numpy as np
@@ -12,44 +11,9 @@ from pydantic import BaseModel
 
 from .parse import CytoRun
 
-logger = logging.getLogger("pycyto.qc")
-
-_CELLS_SCHEMA = {
-    "probe": pl.String,
-    "barcode": pl.Categorical,
-    "n_umis": pl.Int64,
-    "n_reads": pl.Int64,
-    "n_genes": pl.Int64,
-}
-
 
 def _div(a, b) -> float | None:
     return a / b if a is not None and b else None
-
-
-def cell_table(run: CytoRun) -> pl.DataFrame:
-    """Every called cell in the run, one row each.
-
-    A cell is a barcode in a probe's :class:`~pycyto.qc.parse.FilteredCounts` that also
-    appears in that probe's reads table. Called cells missing from the reads table are
-    dropped with a warning.
-
-    Parameters
-    ----------
-    run : CytoRun
-
-    Returns
-    -------
-    pl.DataFrame
-        Columns ``probe, barcode, n_umis, n_reads, n_genes``.
-    """
-    tables = []
-    for probe, counts in run.counts.items():
-        cells = counts.cells.join(run.stats.reads.entries[probe], on="barcode", how="inner")
-        if (missing := counts.cells.height - cells.height) > 0:
-            logger.warning(f"[{probe}] - {missing} filtered barcodes missing from reads stats")
-        tables.append(cells.with_columns(probe=pl.lit(probe)))
-    return pl.concat([pl.DataFrame(schema=_CELLS_SCHEMA), *tables], how="diagonal")
 
 
 class ProbeMetrics(BaseModel):
@@ -76,14 +40,12 @@ class ProbeMetrics(BaseModel):
     reads_in_cells: int
 
     @classmethod
-    def compute(cls, run: CytoRun, cells: pl.DataFrame, probe: str) -> Self:
+    def compute(cls, run: CytoRun, probe: str) -> Self:
         """Metrics for one probe barcode.
 
         Parameters
         ----------
         run : CytoRun
-        cells : pl.DataFrame
-            Output of :func:`cell_table` for ``run``.
         probe : str
             A member of ``run.stats.probes``.
 
@@ -92,7 +54,7 @@ class ProbeMetrics(BaseModel):
         ProbeMetrics
         """
         reads = run.stats.reads.entries[probe]
-        in_cells = cells.filter(pl.col("probe") == probe)
+        in_cells = run.cells.filter(pl.col("probe") == probe)
         return cls(
             probe=probe,
             mapped_reads=reads["n_reads"].sum(),
@@ -162,14 +124,12 @@ class SummaryMetrics(BaseModel):
     background_probe_read_frac: float | None
 
     @classmethod
-    def compute(cls, run: CytoRun, cells: pl.DataFrame, probes: list[ProbeMetrics]) -> Self:
+    def compute(cls, run: CytoRun, probes: list[ProbeMetrics]) -> Self:
         """Run-level metrics.
 
         Parameters
         ----------
         run : CytoRun
-        cells : pl.DataFrame
-            Output of :func:`cell_table` for ``run``.
         probes : list[ProbeMetrics]
             One per probe barcode in ``run.stats.probes``.
 
@@ -177,6 +137,7 @@ class SummaryMetrics(BaseModel):
         -------
         SummaryMetrics
         """
+        cells = run.cells
         mapping, lib = run.stats.mapping, run.stats.library.entries
         umi = run.stats.umi.entries.values()
         counts = list(run.counts.values())
