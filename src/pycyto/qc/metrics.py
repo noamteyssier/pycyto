@@ -3,7 +3,6 @@
 Everything here is a transformation of a parsed :class:`~pycyto.qc.parse.CytoRun`.
 """
 
-import logging
 from typing import Self
 
 import numpy as np
@@ -12,44 +11,37 @@ from pydantic import BaseModel
 
 from .parse import CytoRun
 
-logger = logging.getLogger("pycyto.qc")
-
-_CELLS_SCHEMA = {
-    "probe": pl.String,
-    "barcode": pl.Categorical,
-    "n_umis": pl.Int64,
-    "n_reads": pl.Int64,
-    "n_genes": pl.Int64,
-}
-
 
 def _div(a, b) -> float | None:
     return a / b if a is not None and b else None
 
 
-def cell_table(run: CytoRun) -> pl.DataFrame:
-    """Every called cell in the run, one row each.
-
-    A cell is a barcode in a probe's :class:`~pycyto.qc.parse.FilteredCounts` that also
-    appears in that probe's reads table. Called cells missing from the reads table are
-    dropped with a warning.
+def rank_curve(umis_desc: np.ndarray, is_cell_desc: np.ndarray, n_points: int = 300) -> list:
+    """Barcode-rank curve downsampled to ~n_points log-spaced ranks.
 
     Parameters
     ----------
-    run : CytoRun
+    umis_desc : np.ndarray
+        UMI count per barcode, sorted descending.
+    is_cell_desc : np.ndarray
+        Whether each barcode is a called cell, in the same order.
+    n_points : int
+        Target number of points on the curve.
 
     Returns
     -------
-    pl.DataFrame
-        Columns ``probe, barcode, n_umis, n_reads, n_genes``.
+    list
+        Points ``[rank, umis, fraction of barcodes in the segment that are cells]``,
+        where each point summarizes the barcodes ranked ``(previous rank, rank]``.
     """
-    tables = []
-    for probe, counts in run.counts.items():
-        cells = counts.cells.join(run.stats.reads.entries[probe], on="barcode", how="inner")
-        if (missing := counts.cells.height - cells.height) > 0:
-            logger.warning(f"[{probe}] - {missing} filtered barcodes missing from reads stats")
-        tables.append(cells.with_columns(probe=pl.lit(probe)))
-    return pl.concat([pl.DataFrame(schema=_CELLS_SCHEMA), *tables], how="diagonal")
+    n = len(umis_desc)
+    if n == 0:
+        return []
+    ranks = np.unique(np.clip(np.round(np.logspace(0, np.log10(n), n_points)), 1, n)).astype(int)
+    prev = np.concatenate([[0], ranks[:-1]])
+    csum = np.concatenate([[0], np.cumsum(is_cell_desc)])
+    frac = (csum[ranks] - csum[prev]) / (ranks - prev)
+    return [[int(r), int(u), round(float(f), 3)] for r, u, f in zip(ranks, umis_desc[ranks - 1], frac)]
 
 
 class ProbeMetrics(BaseModel):
@@ -76,14 +68,12 @@ class ProbeMetrics(BaseModel):
     reads_in_cells: int
 
     @classmethod
-    def compute(cls, run: CytoRun, cells: pl.DataFrame, probe: str) -> Self:
+    def compute(cls, run: CytoRun, probe: str) -> Self:
         """Metrics for one probe barcode.
 
         Parameters
         ----------
         run : CytoRun
-        cells : pl.DataFrame
-            Output of :func:`cell_table` for ``run``.
         probe : str
             A member of ``run.stats.probes``.
 
@@ -92,7 +82,7 @@ class ProbeMetrics(BaseModel):
         ProbeMetrics
         """
         reads = run.stats.reads.entries[probe]
-        in_cells = cells.filter(pl.col("probe") == probe)
+        in_cells = run.cells.filter(pl.col("probe") == probe)
         return cls(
             probe=probe,
             mapped_reads=reads["n_reads"].sum(),
@@ -162,14 +152,12 @@ class SummaryMetrics(BaseModel):
     background_probe_read_frac: float | None
 
     @classmethod
-    def compute(cls, run: CytoRun, cells: pl.DataFrame, probes: list[ProbeMetrics]) -> Self:
+    def compute(cls, run: CytoRun, probes: list[ProbeMetrics]) -> Self:
         """Run-level metrics.
 
         Parameters
         ----------
         run : CytoRun
-        cells : pl.DataFrame
-            Output of :func:`cell_table` for ``run``.
         probes : list[ProbeMetrics]
             One per probe barcode in ``run.stats.probes``.
 
@@ -177,6 +165,7 @@ class SummaryMetrics(BaseModel):
         -------
         SummaryMetrics
         """
+        cells = run.cells
         mapping, lib = run.stats.mapping, run.stats.library.entries
         umi = run.stats.umi.entries.values()
         counts = list(run.counts.values())
@@ -204,3 +193,37 @@ class SummaryMetrics(BaseModel):
             frac_reads_in_cells=_div(cells["n_reads"].sum(), mapped),
             background_probe_read_frac=_div(sum(p.mapped_reads for p in probes if p.cells == 0), mapped),
         )
+
+
+class ProbePlots(BaseModel):
+    """Plot inputs for one probe barcode, drawn by the report's JavaScript.
+
+    Attributes
+    ----------
+    curve : list[tuple[int, int, float]]
+        Barcode-rank curve from :func:`rank_curve`: ``(rank, umis, cell fraction)`` points.
+    """
+
+    curve: list[tuple[int, int, float]]
+
+    @classmethod
+    def compute(cls, run: CytoRun, probe: str) -> Self:
+        """Plot inputs for one probe barcode.
+
+        Parameters
+        ----------
+        run : CytoRun
+        probe : str
+            A member of ``run.stats.probes``.
+
+        Returns
+        -------
+        ProbePlots
+        """
+        cell_barcodes = run.cells.filter(pl.col("probe") == probe)["barcode"]
+        ranked = (
+            run.stats.reads.entries[probe]
+            .with_columns(is_cell=pl.col("barcode").is_in(cell_barcodes.implode()))
+            .sort("n_umis", descending=True)
+        )
+        return cls(curve=rank_curve(ranked["n_umis"].to_numpy(), ranked["is_cell"].to_numpy()))
