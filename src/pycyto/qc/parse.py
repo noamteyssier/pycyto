@@ -420,6 +420,33 @@ class CytoStats(BaseModel):
         )
 
 
+class CellTable(pa.DataFrameModel):
+    """Schema for :attr:`CytoRun.cells`: every called cell in a run, one row each.
+
+    Attributes
+    ----------
+    probe : str
+        Probe barcode the cell was called under.
+    barcode : pl.Categorical
+        Cell barcode. Unique together with ``probe``.
+    n_umis : int
+        Deduplicated UMIs, from the probe's reads table.
+    n_reads : int
+        Mapped reads, from the probe's reads table.
+    n_genes : int
+        Features with a nonzero count, from the probe's filtered h5ad.
+    """
+
+    probe: str
+    barcode: pl.Categorical
+    n_umis: int = pa.Field(ge=0)
+    n_reads: int = pa.Field(ge=0)
+    n_genes: int = pa.Field(ge=0)
+
+    class Config:
+        unique = ["probe", "barcode"]  # noqa: RUF012  (pandera reads a plain list here)
+
+
 class CytoRun(BaseModel):
     """A ``cyto workflow gex`` output directory.
 
@@ -461,23 +488,22 @@ class CytoRun(BaseModel):
         )
 
     @cached_property
-    def cells(self) -> pl.DataFrame:
+    def cells(self) -> DataFrame[CellTable]:
         """Every called cell in the run, one row each.
 
         A cell is a barcode in a probe's :class:`FilteredCounts` that also appears in that
         probe's reads table. Called cells missing from the reads table are dropped with a
-        warning. Computed once on first access.
+        warning. Computed and validated once on first access.
 
         Returns
         -------
-        pl.DataFrame
-            Columns ``probe, barcode, n_umis, n_reads, n_genes``.
+        DataFrame[CellTable]
         """
-        schema = {"probe": pl.String, "barcode": pl.Categorical, "n_umis": pl.Int64, "n_reads": pl.Int64, "n_genes": pl.Int64}
+        dtypes = {name: col.type for name, col in CellTable.to_schema().dtypes.items()}
         tables = []
         for probe, counts in self.counts.items():
             cells = counts.cells.join(self.stats.reads.entries[probe], on="barcode", how="inner")
             if (missing := counts.cells.height - cells.height) > 0:
                 logger.warning(f"[{probe}] - {missing} filtered barcodes missing from reads stats")
             tables.append(cells.with_columns(probe=pl.lit(probe)))
-        return pl.concat([pl.DataFrame(schema=schema), *tables], how="diagonal")
+        return CellTable.validate(pl.concat([pl.DataFrame(schema=dtypes), *tables], how="diagonal"))

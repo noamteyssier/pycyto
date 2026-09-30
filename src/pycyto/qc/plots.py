@@ -8,10 +8,11 @@ from typing import Self
 
 import numpy as np
 import polars as pl
+from pandera.typing.polars import DataFrame
 from pydantic import BaseModel
 
 from ..config import FlexBarcode
-from .parse import CytoRun
+from .parse import CellTable, CytoRun
 
 _LOG_EDGES = np.round(np.arange(0, 6.10, 0.05), 2)
 LOG_BINS = _LOG_EDGES[:-1]
@@ -81,13 +82,13 @@ class CellHists(BaseModel):
     gene_hist: list[int] | None
 
     @classmethod
-    def from_cells(cls, cells: pl.DataFrame) -> Self:
+    def from_cells(cls, cells: DataFrame[CellTable]) -> Self:
         """Histograms for a slice of :attr:`CytoRun.cells`.
 
         Parameters
         ----------
-        cells : pl.DataFrame
-            Rows of :attr:`CytoRun.cells`; needs ``n_umis`` and ``n_genes``.
+        cells : DataFrame[CellTable]
+            All of :attr:`CytoRun.cells`, or a subset of its rows.
 
         Returns
         -------
