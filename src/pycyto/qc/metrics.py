@@ -1,123 +1,206 @@
-"""Per-probe and run-level QC metrics for a ``cyto workflow gex`` run."""
+"""Per-probe and run-level QC metrics for a ``cyto workflow gex`` run.
+
+Everything here is a transformation of a parsed :class:`~pycyto.qc.parse.CytoRun`.
+"""
 
 import logging
-import os
-from typing import Any
+from typing import Self
 
-import anndata as ad
 import numpy as np
 import polars as pl
-import scipy.sparse as sp
+from pydantic import BaseModel
 
-from .parse import load_json, read_barcode_stats
+from .parse import CytoRun
 
 logger = logging.getLogger("pycyto.qc")
+
+_CELLS_SCHEMA = {
+    "probe": pl.String,
+    "barcode": pl.Categorical,
+    "n_umis": pl.Int64,
+    "n_reads": pl.Int64,
+    "n_genes": pl.Int64,
+}
 
 
 def _div(a, b) -> float | None:
     return a / b if a is not None and b else None
 
 
-def read_counts(path: str, chunk_rows: int = 10_000) -> tuple[pl.DataFrame, np.ndarray, list[str]]:
-    """Scan a cyto count h5ad.
+def cell_table(run: CytoRun) -> pl.DataFrame:
+    """Every called cell in the run, one row each.
 
-    Returns a ``barcode, n_features`` frame (features with nonzero counts per barcode),
-    the per-feature count totals, and the feature names. ``X`` is read in row chunks
-    from a backed AnnData so memory stays bounded.
+    A cell is a barcode in a probe's :class:`~pycyto.qc.parse.FilteredCounts` that also
+    appears in that probe's reads table. Called cells missing from the reads table are
+    dropped with a warning.
+
+    Parameters
+    ----------
+    run : CytoRun
+
+    Returns
+    -------
+    pl.DataFrame
+        Columns ``probe, barcode, n_umis, n_reads, n_genes``.
     """
-    adata = ad.read_h5ad(path, backed="r")
-    try:
-        n_features = np.zeros(adata.n_obs, dtype=np.int64)
-        totals = np.zeros(adata.n_vars, dtype=np.float64)
-        for start in range(0, adata.n_obs, chunk_rows):
-            block = sp.csr_matrix(adata.X[start : start + chunk_rows])
-            block.eliminate_zeros()
-            n_features[start : start + block.shape[0]] = np.diff(block.indptr)
-            totals += np.asarray(block.sum(axis=0)).ravel()
-        # cyto names cells ``<barcode>-<probe>`` (e.g. ``ACGT...-A-A02``)
-        barcodes = [name.split("-", 1)[0] for name in adata.obs_names]
-        names = adata.var_names.tolist()
-    finally:
-        adata.file.close()
-    return pl.DataFrame({"barcode": barcodes, "n_features": n_features}), totals, names
-
-
-def process_probe(cyto_outdir: str, probe: str) -> dict[str, Any]:
-    """Metrics and per-cell arrays for one probe barcode.
-
-    Cells are exactly the barcodes in cyto's ``counts/<probe>.filt.h5ad``; probe barcodes
-    without that file have no cells. ``rec`` is the row shown in the report's probe table;
-    ``umi_counts`` is the ``(corrected, total)`` pair from ``stats/umi/<probe>.umi.json``,
-    only used by :func:`summarize`.
-    """
-    stats = os.path.join(cyto_outdir, "stats")
-    df = read_barcode_stats(os.path.join(stats, "reads", f"{probe}.reads.tsv.zst"))
-    umi = load_json(os.path.join(stats, "umi", f"{probe}.umi.json"))
-
-    filt = os.path.join(cyto_outdir, "counts", f"{probe}.filt.h5ad")
-    detected = None
-    if os.path.exists(filt):
-        cells, totals, _ = read_counts(filt)
-        detected = totals > 0
-        df = df.join(cells.rename({"n_features": "n_genes"}), on="barcode", how="left")
-        if (missing := cells.height - df["n_genes"].count()) > 0:
+    tables = []
+    for probe, counts in run.counts.items():
+        cells = counts.cells.join(run.stats.reads.entries[probe], on="barcode", how="inner")
+        if (missing := counts.cells.height - cells.height) > 0:
             logger.warning(f"[{probe}] - {missing} filtered barcodes missing from reads stats")
-    else:
-        df = df.with_columns(n_genes=pl.lit(None, dtype=pl.Int64))
-    df = df.with_columns(is_cell=pl.col("n_genes").is_not_null())
-    in_cells = df.filter("is_cell")
-    cell_umis = in_cells["n_umis"].to_numpy()
-    cell_genes = in_cells["n_genes"].to_numpy()
-    return {
-        "rec": {
-            "probe": probe,
-            "mapped_reads": df["n_reads"].sum(),
-            "umis": df["n_umis"].sum(),
-            "cells": in_cells.height,
-            "reads_in_cells": in_cells["n_reads"].sum(),
-        },
-        "cell_umis": cell_umis,
-        "cell_genes": cell_genes,
-        "detected": detected,
-        "umi_counts": (umi["corrected"], umi["total"]),
-    }
+        tables.append(cells.with_columns(probe=pl.lit(probe)))
+    return pl.concat([pl.DataFrame(schema=_CELLS_SCHEMA), *tables], how="diagonal")
 
 
-def summarize(results: list[dict], meta: dict, cyto_outdir: str) -> dict[str, Any]:
-    """Run-level metrics (the numbers behind the report's Summary tab)."""
-    recs = [r["rec"] for r in results]
-    mapped = sum(r["mapped_reads"] for r in recs)
-    umis = sum(r["umis"] for r in recs)
-    corrected = sum(r["umi_counts"][0] for r in results)
-    total_umis = sum(r["umi_counts"][1] for r in results)
-    mapping = meta["mapping"]
-    lib = {d["name"]: d for d in meta["library"]}
+class ProbeMetrics(BaseModel):
+    """One row of the report's probe table.
 
-    probes = pl.DataFrame(recs, infer_schema_length=None)
-    called = probes.filter(pl.col("cells") > 0)
-    n_cells = called["cells"].sum()
-    cell_umis = np.concatenate([r["cell_umis"] for r in results])
-    cell_genes = np.concatenate([r["cell_genes"] for r in results])
-    detected = [r["detected"] for r in results if r["detected"] is not None]
-    return {
-        "cyto_outdir": os.path.abspath(cyto_outdir),
-        "total_reads": mapping["total_reads"],
-        "mapped_reads": mapping["mapped_reads"],
-        "mapped_reads_frac": mapping["mapped_reads_frac"],
-        "probe_barcodes_in_library": lib["probe"]["total_elem"],
-        "probe_barcodes_with_reads": len(recs),
-        "seq_saturation": 1 - umis / mapped if mapped else None,
-        "umi_corrected_frac": _div(corrected, total_umis),
-        # cells (cyto's filtered h5ad)
-        "estimated_cells": n_cells,
-        "probe_barcodes_with_cells": called.height,
-        "mean_reads_per_cell": _div(mapping["total_reads"], n_cells),
-        "mean_mapped_reads_per_cell": _div(mapping["mapped_reads"], n_cells),
-        "median_umis_per_cell": float(np.median(cell_umis)) if len(cell_umis) else None,
-        "median_genes_per_cell": float(np.median(cell_genes)) if len(cell_genes) else None,
-        "total_genes_detected": int(np.logical_or.reduce(detected).sum()) if detected else None,
-        "genes_in_reference": len(detected[0]) if detected else lib["gex"]["total_aggr"],
-        "frac_reads_in_cells": _div(probes["reads_in_cells"].sum(), mapped),
-        "background_probe_read_frac": _div(probes.filter(pl.col("cells") == 0)["mapped_reads"].sum(), mapped),
-        "cells_median_per_probe": called["cells"].median(),
-    }
+    Attributes
+    ----------
+    probe : str
+        Probe barcode.
+    mapped_reads : int
+        Mapped reads under this probe barcode, over all cell barcodes.
+    umis : int
+        Deduplicated UMIs under this probe barcode, over all cell barcodes.
+    cells : int
+        Called cells.
+    reads_in_cells : int
+        Mapped reads belonging to called cells.
+    """
+
+    probe: str
+    mapped_reads: int
+    umis: int
+    cells: int
+    reads_in_cells: int
+
+    @classmethod
+    def compute(cls, run: CytoRun, cells: pl.DataFrame, probe: str) -> Self:
+        """Metrics for one probe barcode.
+
+        Parameters
+        ----------
+        run : CytoRun
+        cells : pl.DataFrame
+            Output of :func:`cell_table` for ``run``.
+        probe : str
+            A member of ``run.stats.probes``.
+
+        Returns
+        -------
+        ProbeMetrics
+        """
+        reads = run.stats.reads.entries[probe]
+        in_cells = cells.filter(pl.col("probe") == probe)
+        return cls(
+            probe=probe,
+            mapped_reads=reads["n_reads"].sum(),
+            umis=reads["n_umis"].sum(),
+            cells=in_cells.height,
+            reads_in_cells=in_cells["n_reads"].sum(),
+        )
+
+
+class SummaryMetrics(BaseModel):
+    """Run-level metrics behind the report's Summary tab and ``*_metrics_summary.csv``.
+
+    Fields are ``None`` when undefined, e.g. per-cell medians on a run with no cells.
+
+    Attributes
+    ----------
+    cyto_outdir : str
+        Absolute path to the run.
+    total_reads, mapped_reads, mapped_reads_frac
+        Straight from ``mapping_map.json``.
+    probe_barcodes_in_library : int
+        Probe barcodes in the reference, from ``mapping_lib.json``.
+    genes_in_reference : int
+        Features in the count matrices, or in the ``gex`` library when no probe has cells.
+    probe_barcodes_with_reads : int
+        Probe barcodes with a reads table.
+    seq_saturation : float or None
+        ``1 - UMIs / mapped reads`` over all barcodes.
+    umi_corrected_frac : float or None
+        Corrected UMIs / total UMIs over all probe barcodes.
+    estimated_cells : int
+        Called cells over all probe barcodes.
+    probe_barcodes_with_cells : int
+        Probe barcodes with at least one called cell.
+    cells_median_per_probe : float or None
+        Median called cells among probe barcodes with cells.
+    mean_reads_per_cell, mean_mapped_reads_per_cell : float or None
+        ``total_reads`` and ``mapped_reads`` divided by ``estimated_cells``.
+    median_umis_per_cell, median_genes_per_cell : float or None
+        Medians over all called cells.
+    total_genes_detected : int or None
+        Features with a nonzero total in any probe's called cells.
+    frac_reads_in_cells : float or None
+        Mapped reads in called cells / all mapped reads.
+    background_probe_read_frac : float or None
+        Mapped reads in probe barcodes without cells / all mapped reads.
+    """
+
+    cyto_outdir: str
+    total_reads: int
+    mapped_reads: int
+    mapped_reads_frac: float
+    probe_barcodes_in_library: int
+    genes_in_reference: int
+    probe_barcodes_with_reads: int
+    seq_saturation: float | None
+    umi_corrected_frac: float | None
+    estimated_cells: int
+    probe_barcodes_with_cells: int
+    cells_median_per_probe: float | None
+    mean_reads_per_cell: float | None
+    mean_mapped_reads_per_cell: float | None
+    median_umis_per_cell: float | None
+    median_genes_per_cell: float | None
+    total_genes_detected: int | None
+    frac_reads_in_cells: float | None
+    background_probe_read_frac: float | None
+
+    @classmethod
+    def compute(cls, run: CytoRun, cells: pl.DataFrame, probes: list[ProbeMetrics]) -> Self:
+        """Run-level metrics.
+
+        Parameters
+        ----------
+        run : CytoRun
+        cells : pl.DataFrame
+            Output of :func:`cell_table` for ``run``.
+        probes : list[ProbeMetrics]
+            One per probe barcode in ``run.stats.probes``.
+
+        Returns
+        -------
+        SummaryMetrics
+        """
+        mapping, lib = run.stats.mapping, run.stats.library.entries
+        umi = run.stats.umi.entries.values()
+        counts = list(run.counts.values())
+        called = [p for p in probes if p.cells > 0]
+        mapped = sum(p.mapped_reads for p in probes)
+        n_cells = cells.height
+        return cls(
+            cyto_outdir=run.path,
+            total_reads=mapping.total_reads,
+            mapped_reads=mapping.mapped_reads,
+            mapped_reads_frac=mapping.mapped_reads_frac,
+            probe_barcodes_in_library=lib["probe"].total_elem,
+            genes_in_reference=counts[0].n_features if counts else lib["gex"].total_aggr,
+            probe_barcodes_with_reads=len(probes),
+            seq_saturation=1 - sum(p.umis for p in probes) / mapped if mapped else None,
+            umi_corrected_frac=_div(sum(u.corrected for u in umi), sum(u.total for u in umi)),
+            estimated_cells=n_cells,
+            probe_barcodes_with_cells=len(called),
+            cells_median_per_probe=float(np.median([p.cells for p in called])) if called else None,
+            mean_reads_per_cell=_div(mapping.total_reads, n_cells),
+            mean_mapped_reads_per_cell=_div(mapping.mapped_reads, n_cells),
+            median_umis_per_cell=cells["n_umis"].median(),
+            median_genes_per_cell=cells["n_genes"].median(),
+            total_genes_detected=int(np.logical_or.reduce([c.features_detected for c in counts]).sum()) if counts else None,
+            frac_reads_in_cells=_div(cells["n_reads"].sum(), mapped),
+            background_probe_read_frac=_div(sum(p.mapped_reads for p in probes if p.cells == 0), mapped),
+        )

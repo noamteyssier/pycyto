@@ -1,8 +1,10 @@
 import json
 import os
 import re
+from typing import Annotated
 
 import polars as pl
+from pydantic import AfterValidator
 
 KNOWN_LIBMODES = ["gex", "crispr", "ab"]
 
@@ -29,6 +31,16 @@ FLEX_V2_BARCODES_UNDERSCORE = [bc.replace("-", "_") for bc in FLEX_V2_BARCODES]
 # Combined list for validation
 KNOWN_PROBE_SET = FLEX_V1_PROBE_SETS + FLEX_V2_SETS
 KNOWN_BARCODES = FLEX_V1_BARCODES + FLEX_V2_BARCODES + FLEX_V2_BARCODES_UNDERSCORE
+
+
+def validate_flex_barcode(bc: str) -> str:
+    if bc not in KNOWN_BARCODES:
+        raise ValueError(f"{bc!r} is not a Flex V1 (BC/CR/AB 001-016) or Flex V2 ([ABCD]-[A-H][01-12]) barcode")
+    return bc
+
+
+FlexBarcode = Annotated[str, AfterValidator(validate_flex_barcode)]
+"""Pydantic field type for a probe barcode in either Flex format."""
 EXPECTED_SAMPLE_KEYS = [
     "experiment",
     "sample",
