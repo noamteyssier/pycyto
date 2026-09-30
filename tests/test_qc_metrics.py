@@ -7,8 +7,8 @@ import numpy as np
 import polars as pl
 import pytest
 
-from pycyto.qc.metrics import rank_curve
 from pycyto.qc.parse import FilteredCounts
+from pycyto.qc.plots import rank_curve
 
 
 class TestFilteredCounts:

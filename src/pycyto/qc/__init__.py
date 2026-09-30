@@ -8,8 +8,9 @@ import logging
 import os
 from importlib.metadata import version
 
-from .metrics import LOG_BINS, PooledPlots, ProbeMetrics, ProbePlots, SummaryMetrics
+from .metrics import ProbeMetrics, SummaryMetrics
 from .parse import CytoRun
+from .plots import LOG_BINS, PooledPlots, ProbePlots
 from .render import render_html, write_csvs
 
 __all__ = ["build_report", "collect"]
