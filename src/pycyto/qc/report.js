@@ -187,7 +187,7 @@ function drawSummaryPlots() {
   if (probe) rankCurve($("#rank-plot"), probe);
   else rankOverlay($("#rank-plot"));
   $$("#summary-panels .hint").forEach((node) => (node.textContent = probe || "all probe barcodes"));
-  const hists = probe ? PLOTS[probe] : D.plots.pooled;
+  const hists = probe ? PLOTS[probe].hists : D.plots.pooled;
   histogram($("#umi-hist"), hists.umi_hist, "UMIs per cell");
   histogram($("#gene-hist"), hists.gene_hist, "Genes per cell");
 }

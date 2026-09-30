@@ -10,6 +10,7 @@ import numpy as np
 import polars as pl
 from pydantic import BaseModel
 
+from ..config import FlexBarcode
 from .parse import CytoRun
 
 _LOG_EDGES = np.round(np.arange(0, 6.10, 0.05), 2)
@@ -36,7 +37,11 @@ def log_hist(values: np.ndarray) -> list[int] | None:
     return counts.tolist()
 
 
-def rank_curve(umis_desc: np.ndarray, is_cell_desc: np.ndarray, n_points: int = 300) -> list:
+RankPoint = tuple[int, int, float]
+"""One barcode-rank curve point: ``(rank, umis, fraction of the segment that are cells)``."""
+
+
+def rank_curve(umis_desc: np.ndarray, is_cell_desc: np.ndarray, n_points: int = 300) -> list[RankPoint]:
     """Barcode-rank curve downsampled to ~n_points log-spaced ranks.
 
     Parameters
@@ -50,9 +55,8 @@ def rank_curve(umis_desc: np.ndarray, is_cell_desc: np.ndarray, n_points: int = 
 
     Returns
     -------
-    list
-        Points ``[rank, umis, fraction of barcodes in the segment that are cells]``,
-        where each point summarizes the barcodes ranked ``(previous rank, rank]``.
+    list[RankPoint]
+        Each point summarizes the barcodes ranked ``(previous rank, rank]``.
     """
     n = len(umis_desc)
     if n == 0:
@@ -61,15 +65,7 @@ def rank_curve(umis_desc: np.ndarray, is_cell_desc: np.ndarray, n_points: int = 
     prev = np.concatenate([[0], ranks[:-1]])
     csum = np.concatenate([[0], np.cumsum(is_cell_desc)])
     frac = (csum[ranks] - csum[prev]) / (ranks - prev)
-    return [[int(r), int(u), round(float(f), 3)] for r, u, f in zip(ranks, umis_desc[ranks - 1], frac)]
-
-
-def _cell_hists(cells: pl.DataFrame) -> dict[str, list[int] | None]:
-    """``umi_hist`` / ``gene_hist`` for a slice of :attr:`CytoRun.cells`."""
-    return {
-        "umi_hist": log_hist(cells["n_umis"].to_numpy()),
-        "gene_hist": log_hist(cells["n_genes"].to_numpy()),
-    }
+    return [(int(r), int(u), round(float(f), 3)) for r, u, f in zip(ranks, umis_desc[ranks - 1], frac)]
 
 
 class CellHists(BaseModel):
@@ -84,17 +80,38 @@ class CellHists(BaseModel):
     umi_hist: list[int] | None
     gene_hist: list[int] | None
 
+    @classmethod
+    def from_cells(cls, cells: pl.DataFrame) -> Self:
+        """Histograms for a slice of :attr:`CytoRun.cells`.
 
-class ProbePlots(CellHists):
-    """Plot inputs for one probe barcode: its cell histograms plus a barcode-rank curve.
+        Parameters
+        ----------
+        cells : pl.DataFrame
+            Rows of :attr:`CytoRun.cells`; needs ``n_umis`` and ``n_genes``.
+
+        Returns
+        -------
+        CellHists
+        """
+        return cls(
+            umi_hist=log_hist(cells["n_umis"].to_numpy()),
+            gene_hist=log_hist(cells["n_genes"].to_numpy()),
+        )
+
+
+class ProbePlots(BaseModel):
+    """Plot inputs for one probe barcode.
 
     Attributes
     ----------
-    curve : list[tuple[int, int, float]]
-        Barcode-rank curve from :func:`rank_curve`: ``(rank, umis, cell fraction)`` points.
+    curve : list[RankPoint]
+        Barcode-rank curve over every cell barcode under the probe, from :func:`rank_curve`.
+    hists : CellHists
+        Histograms over the probe's called cells.
     """
 
-    curve: list[tuple[int, int, float]]
+    curve: list[RankPoint]
+    hists: CellHists
 
 
 class Plots(BaseModel):
@@ -106,13 +123,13 @@ class Plots(BaseModel):
         :data:`LOG_BINS`, so the report can label histogram axes.
     pooled : CellHists
         Histograms over every called cell in the run.
-    probes : dict[str, ProbePlots]
+    probes : dict[FlexBarcode, ProbePlots]
         Per-probe-barcode plots, in :attr:`CytoStats.probes` order.
     """
 
     log_bins: list[float]
     pooled: CellHists
-    probes: dict[str, ProbePlots]
+    probes: dict[FlexBarcode, ProbePlots]
 
     @classmethod
     def compute(cls, run: CytoRun) -> Self:
@@ -128,7 +145,7 @@ class Plots(BaseModel):
         """
         return cls(
             log_bins=LOG_BINS.tolist(),
-            pooled=CellHists(**_cell_hists(run.cells)),
+            pooled=CellHists.from_cells(run.cells),
             probes={probe: cls._probe(run, probe) for probe in run.stats.probes},
         )
 
@@ -141,4 +158,4 @@ class Plots(BaseModel):
             .sort("n_umis", descending=True)
         )
         curve = rank_curve(ranked["n_umis"].to_numpy(), ranked["is_cell"].to_numpy())
-        return ProbePlots(curve=curve, **_cell_hists(cells))
+        return ProbePlots(curve=curve, hists=CellHists.from_cells(cells))
