@@ -5,8 +5,8 @@
 const D = JSON.parse(document.getElementById("data").textContent);
 const S = D.summary;
 const PROBES = D.probes;
-const PLOTS = D.plots;
-const BINS = D.log_bins; // log10 bin edges, width 0.05
+const PLOTS = D.plots.probes;
+const BINS = D.plots.log_bins; // log10 bin edges, width 0.05
 const byProbe = Object.fromEntries(PROBES.map((p) => [p.probe, p]));
 const cellsLabel = (p) => (p.cells ? ` · ${fmt.int(p.cells)} cells` : ""); // suffix in the probe barcode picker
 const $ = (sel) => document.querySelector(sel);
@@ -187,7 +187,7 @@ function drawSummaryPlots() {
   if (probe) rankCurve($("#rank-plot"), probe);
   else rankOverlay($("#rank-plot"));
   $$("#summary-panels .hint").forEach((node) => (node.textContent = probe || "all probe barcodes"));
-  const hists = probe ? PLOTS[probe] : D.pooled;
+  const hists = probe ? PLOTS[probe] : D.plots.pooled;
   histogram($("#umi-hist"), hists.umi_hist, "UMIs per cell");
   histogram($("#gene-hist"), hists.gene_hist, "Genes per cell");
 }

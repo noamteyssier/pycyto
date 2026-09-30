@@ -72,63 +72,68 @@ def _cell_hists(cells: pl.DataFrame) -> dict[str, list[int] | None]:
     }
 
 
-class PooledPlots(BaseModel):
-    """Run-wide plot inputs, pooled over every probe barcode.
+class CellHists(BaseModel):
+    """Per-cell histograms over some set of called cells.
 
     Attributes
     ----------
     umi_hist, gene_hist : list[int] or None
-        :func:`log_hist` of UMIs and genes per called cell across the run; None when
-        the run has no cells.
+        :func:`log_hist` of UMIs and genes per cell; None when there are no cells.
     """
 
     umi_hist: list[int] | None
     gene_hist: list[int] | None
 
-    @classmethod
-    def compute(cls, run: CytoRun) -> Self:
-        """Pooled plot inputs for a run.
 
-        Parameters
-        ----------
-        run : CytoRun
-
-        Returns
-        -------
-        PooledPlots
-        """
-        return cls(**_cell_hists(run.cells))
-
-
-class ProbePlots(BaseModel):
-    """Plot inputs for one probe barcode.
+class ProbePlots(CellHists):
+    """Plot inputs for one probe barcode: its cell histograms plus a barcode-rank curve.
 
     Attributes
     ----------
     curve : list[tuple[int, int, float]]
         Barcode-rank curve from :func:`rank_curve`: ``(rank, umis, cell fraction)`` points.
-    umi_hist, gene_hist : list[int] or None
-        :func:`log_hist` of UMIs and genes per called cell; None when the probe has no cells.
     """
 
     curve: list[tuple[int, int, float]]
-    umi_hist: list[int] | None
-    gene_hist: list[int] | None
+
+
+class Plots(BaseModel):
+    """Every chart input in the report.
+
+    Attributes
+    ----------
+    log_bins : list[float]
+        :data:`LOG_BINS`, so the report can label histogram axes.
+    pooled : CellHists
+        Histograms over every called cell in the run.
+    probes : dict[str, ProbePlots]
+        Per-probe-barcode plots, in :attr:`CytoStats.probes` order.
+    """
+
+    log_bins: list[float]
+    pooled: CellHists
+    probes: dict[str, ProbePlots]
 
     @classmethod
-    def compute(cls, run: CytoRun, probe: str) -> Self:
-        """Plot inputs for one probe barcode.
+    def compute(cls, run: CytoRun) -> Self:
+        """Plot inputs for a run.
 
         Parameters
         ----------
         run : CytoRun
-        probe : str
-            A member of ``run.stats.probes``.
 
         Returns
         -------
-        ProbePlots
+        Plots
         """
+        return cls(
+            log_bins=LOG_BINS.tolist(),
+            pooled=CellHists(**_cell_hists(run.cells)),
+            probes={probe: cls._probe(run, probe) for probe in run.stats.probes},
+        )
+
+    @staticmethod
+    def _probe(run: CytoRun, probe: str) -> ProbePlots:
         cells = run.cells.filter(pl.col("probe") == probe)
         ranked = (
             run.stats.reads.entries[probe]
@@ -136,4 +141,4 @@ class ProbePlots(BaseModel):
             .sort("n_umis", descending=True)
         )
         curve = rank_curve(ranked["n_umis"].to_numpy(), ranked["is_cell"].to_numpy())
-        return cls(curve=curve, **_cell_hists(cells))
+        return ProbePlots(curve=curve, **_cell_hists(cells))
