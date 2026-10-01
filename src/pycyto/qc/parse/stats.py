@@ -65,7 +65,7 @@ class BarcodeReadStats(pa.DataFrameModel):
     @pa.dataframe_check
     def reads_cover_umis(cls, data: pa.PolarsData) -> pl.LazyFrame:
         """Every UMI is backed by at least one read."""
-        return data.lazyframe.select(pl.col("n_reads") >= pl.col("n_umis"))
+        return data.lazyframe.select(pl.col(cls.n_reads) >= pl.col(cls.n_umis))
 
 
 class ReadStats(BaseModel):
@@ -353,6 +353,29 @@ class Libraries(BaseModel):
             f"Can't tell which cyto workflow produced this directory (libraries: {sorted(self.entries)}); "
             "expected a `cyto workflow gex` or `cyto workflow crispr` run"
         )
+
+
+def detect_workflow(cyto_outdir: str) -> Workflow:
+    """The cyto workflow that produced a directory, from ``stats/mapping_lib.json`` alone.
+
+    Cheap: reads one small JSON file, so callers can pick the right :class:`CytoRun`
+    subclass before loading everything else.
+
+    Parameters
+    ----------
+    cyto_outdir : str
+        A cyto output directory containing ``stats/``.
+
+    Returns
+    -------
+    Workflow
+
+    Raises
+    ------
+    ValueError
+        If the workflow cannot be told from ``mapping_lib.json``.
+    """
+    return Libraries.from_json(os.path.join(cyto_outdir, "stats", "mapping_lib.json")).workflow
 
 
 class CytoStats(BaseModel):

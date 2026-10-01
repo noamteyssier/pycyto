@@ -2,6 +2,7 @@
 
 import logging
 import os
+from abc import abstractmethod
 from functools import cached_property
 from typing import Self
 
@@ -20,7 +21,7 @@ logger = logging.getLogger("pycyto.qc")
 class CytoRun(BaseModel):
     """A cyto output directory: the shared ``stats/`` plus whatever the workflow writes.
 
-    :class:`GexRun` and :class:`CrisprRun` add the workflow's count files; this base
+    :class:`GexCytoRun` and :class:`CrisprCytoRun` add the workflow's count files; this base
     holds what every workflow has.
 
     Attributes
@@ -35,24 +36,9 @@ class CytoRun(BaseModel):
     stats: CytoStats
 
     @classmethod
-    def from_stats(cls, cyto_outdir: str, stats: CytoStats) -> Self:
-        """Build the run from already-loaded stats; subclasses also read their count files.
-
-        Parameters
-        ----------
-        cyto_outdir : str
-            The output directory ``stats`` was read from.
-        stats : CytoStats
-
-        Returns
-        -------
-        CytoRun
-        """
-        return cls(path=os.path.abspath(cyto_outdir), stats=stats)
-
-    @classmethod
+    @abstractmethod
     def read(cls, cyto_outdir: str) -> Self:
-        """Load and validate a cyto output directory.
+        """Load and validate a cyto output directory: ``stats/`` plus the workflow's count files.
 
         Parameters
         ----------
@@ -63,10 +49,9 @@ class CytoRun(BaseModel):
         -------
         CytoRun
         """
-        return cls.from_stats(cyto_outdir, CytoStats.read(cyto_outdir))
 
 
-class GexRun(CytoRun):
+class GexCytoRun(CytoRun):
     """A ``cyto workflow gex`` output directory.
 
     Attributes
@@ -80,7 +65,8 @@ class GexRun(CytoRun):
     counts: dict[FlexBarcode, FilteredCounts]
 
     @classmethod
-    def from_stats(cls, cyto_outdir: str, stats: CytoStats) -> Self:
+    def read(cls, cyto_outdir: str) -> Self:
+        stats = CytoStats.read(cyto_outdir)
         paths = {p: os.path.join(cyto_outdir, "counts", f"{p}.filt.h5ad") for p in stats.probes}
         return cls(
             path=os.path.abspath(cyto_outdir),
@@ -103,14 +89,20 @@ class GexRun(CytoRun):
         dtypes = {name: col.type for name, col in CellTable.to_schema().dtypes.items()}
         tables = []
         for probe, counts in self.counts.items():
-            cells = counts.cells.join(self.stats.reads.entries[probe], on="barcode", how="inner")
+            cells = counts.cells.join(self.stats.reads.entries[probe], on=CellTable.barcode, how="inner")
             if (missing := counts.cells.height - cells.height) > 0:
                 logger.warning(f"[{probe}] - {missing} filtered barcodes missing from reads stats")
-            tables.append(cells.with_columns(probe=pl.lit(probe)))
+            tables.append(cells.with_columns(pl.lit(probe).alias(CellTable.probe)))
         return CellTable.validate(pl.concat([pl.DataFrame(schema=dtypes), *tables], how="diagonal"))
 
+    @cached_property
+    def cells_by_probe(self) -> dict[str, pl.DataFrame]:
+        """:attr:`cells` split by probe barcode (same columns); every probe in :attr:`CytoStats.probes` has an entry, possibly empty."""
+        parts = self.cells.partition_by(CellTable.probe, as_dict=True)
+        return {p: parts.get((p,), self.cells.clear()) for p in self.stats.probes}
 
-class CrisprRun(CytoRun):
+
+class CrisprCytoRun(CytoRun):
     """A ``cyto workflow crispr`` output directory.
 
     A CRISPR run has no cell calls: ``counts/<probe>.h5ad`` holds guide UMIs for every
@@ -132,7 +124,8 @@ class CrisprRun(CytoRun):
     guide_umis: dict[FlexBarcode, np.ndarray]
 
     @classmethod
-    def from_stats(cls, cyto_outdir: str, stats: CytoStats) -> Self:
+    def read(cls, cyto_outdir: str) -> Self:
+        stats = CytoStats.read(cyto_outdir)
         names: list[str] = []
         umis = {}
         for probe in stats.probes:

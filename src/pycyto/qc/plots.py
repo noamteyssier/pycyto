@@ -1,22 +1,27 @@
-"""Chart inputs every cyto workflow reports.
+"""Chart inputs: the shared :class:`Plots` / :class:`ProbePlots` and each workflow's subclass.
 
 Everything here is a transformation of a parsed :class:`~pycyto.qc.parse.CytoRun`; the
-report's JavaScript does the drawing. Workflow modules subclass :class:`Plots` and
-:class:`ProbePlots` to add their own charts.
+report's JavaScript does the drawing. Workflow subclasses add their own charts, overriding
+``compute`` to build the base model and extend it.
 """
 
-from typing import Any, Self
+from typing import Self
 
 import numpy as np
 import polars as pl
+from pandera.typing.polars import DataFrame
 from pydantic import BaseModel
 
 from ..config import FlexBarcode
-from .parse import CytoRun
+from .metrics import safe_div
+from .parse import BarcodeReadStats, CellTable, CrisprCytoRun, CytoRun, GexCytoRun
 
 _LOG_EDGES = np.round(np.arange(0, 6.10, 0.05), 2)
 LOG_BINS = _LOG_EDGES[:-1]
 """log10 bin edges (width 0.05) for the histograms embedded in the report."""
+
+TOP_GUIDES = 10
+"""Most abundant guides listed in the CRISPR report."""
 
 
 def log_hist(values: np.ndarray) -> list[int] | None:
@@ -85,11 +90,14 @@ def probe_rank_curve(run: CytoRun, probe: str, cell_barcodes: pl.Series | None =
     -------
     list[RankPoint]
     """
-    is_cell = pl.lit(False) if cell_barcodes is None else pl.col("barcode").is_in(cell_barcodes.implode())
-    ranked = run.stats.reads.entries[probe].with_columns(is_cell=is_cell).sort("n_umis", descending=True)
-    return rank_curve(ranked["n_umis"].to_numpy(), ranked["is_cell"].to_numpy())
+    is_cell = pl.lit(False) if cell_barcodes is None else pl.col(BarcodeReadStats.barcode).is_in(cell_barcodes.implode())
+    ranked = run.stats.reads.entries[probe].with_columns(is_cell=is_cell).sort(BarcodeReadStats.n_umis, descending=True)
+    return rank_curve(ranked[BarcodeReadStats.n_umis].to_numpy(), ranked["is_cell"].to_numpy())
 
 
+# ============================================================================
+# Shared
+# ============================================================================
 class ProbePlots(BaseModel):
     """Plot inputs for one probe barcode.
 
@@ -105,18 +113,20 @@ class ProbePlots(BaseModel):
 class Plots(BaseModel):
     """Every chart input in the report.
 
-    Subclasses redeclare ``probes`` with their :class:`ProbePlots` subclass, add a
-    ``pooled`` field for run-wide charts, and extend ``_fields`` / ``_probe``.
+    Subclasses add a ``pooled`` field for run-wide charts and build ``probes`` from their
+    own :class:`ProbePlots` subclass.
 
     Attributes
     ----------
     log_bins : list[float]
         :data:`LOG_BINS`, so the report can label histogram axes.
     probes : dict[FlexBarcode, ProbePlots]
-        Per-probe-barcode plots, in :attr:`CytoStats.probes` order.
+        Per-probe-barcode plots, in :attr:`CytoStats.probes` order. Holds the workflow's
+        :class:`ProbePlots` subclass; :func:`pycyto.qc.collect` dumps with
+        ``serialize_as_any`` so its extra fields reach the report.
     """
 
-    log_bins: list[float]
+    log_bins: list[float] = LOG_BINS.tolist()
     probes: dict[FlexBarcode, ProbePlots]
 
     @classmethod
@@ -131,14 +141,155 @@ class Plots(BaseModel):
         -------
         Plots
         """
-        return cls(**cls._fields(run))
+        return cls(probes={probe: ProbePlots(curve=probe_rank_curve(run, probe)) for probe in run.stats.probes})
+
+
+# ============================================================================
+# GEX
+# ============================================================================
+class CellHists(BaseModel):
+    """Per-cell histograms over some set of called cells.
+
+    Attributes
+    ----------
+    umi_hist, gene_hist : list[int] or None
+        :func:`log_hist` of UMIs and genes per cell; None when there are no cells.
+    """
+
+    umi_hist: list[int] | None
+    gene_hist: list[int] | None
 
     @classmethod
-    def _fields(cls, run: CytoRun) -> dict[str, Any]:
-        """Constructor kwargs; subclasses extend with ``super()._fields(run) | {...}``."""
-        return {"log_bins": LOG_BINS.tolist(), "probes": {probe: cls._probe(run, probe) for probe in run.stats.probes}}
+    def from_cells(cls, cells: DataFrame[CellTable]) -> Self:
+        """Histograms for a slice of :attr:`~pycyto.qc.parse.GexCytoRun.cells`.
+
+        Parameters
+        ----------
+        cells : DataFrame[CellTable]
+            All of :attr:`~pycyto.qc.parse.GexCytoRun.cells`, or a subset of its rows.
+
+        Returns
+        -------
+        CellHists
+        """
+        return cls(
+            umi_hist=log_hist(cells[CellTable.n_umis].to_numpy()),
+            gene_hist=log_hist(cells[CellTable.n_genes].to_numpy()),
+        )
+
+
+class GexProbePlots(ProbePlots):
+    """Plot inputs for one probe barcode of a GEX run.
+
+    Attributes
+    ----------
+    hists : CellHists
+        Histograms over the probe's called cells.
+    """
+
+    hists: CellHists
+
+
+class GexPlots(Plots):
+    """Chart inputs for a GEX run.
+
+    Attributes
+    ----------
+    pooled : CellHists
+        Histograms over every called cell in the run.
+    """
+
+    pooled: CellHists
 
     @classmethod
-    def _probe(cls, run: CytoRun, probe: str) -> ProbePlots:
-        """Plot inputs for one probe barcode; subclasses return their :class:`ProbePlots` subclass."""
-        return ProbePlots(curve=probe_rank_curve(run, probe))
+    def compute(cls, run: GexCytoRun) -> Self:
+        def probe_plots(probe: str) -> GexProbePlots:
+            cells = run.cells_by_probe[probe]
+            return GexProbePlots(
+                curve=probe_rank_curve(run, probe, cells[CellTable.barcode]), hists=CellHists.from_cells(cells)
+            )
+
+        return cls(
+            pooled=CellHists.from_cells(run.cells),
+            probes={probe: probe_plots(probe) for probe in run.stats.probes},
+        )
+
+
+# ============================================================================
+# CRISPR
+# ============================================================================
+class TopGuide(BaseModel):
+    """One row of the report's most-abundant-guides table.
+
+    Attributes
+    ----------
+    guide : str
+    umis : int
+        UMIs over every probe barcode.
+    frac : float or None
+        Share of all guide UMIs in the run.
+    """
+
+    guide: str
+    umis: int
+    frac: float | None
+
+
+class GuidePooled(BaseModel):
+    """Run-wide guide coverage charts.
+
+    Attributes
+    ----------
+    guide_hist : list[int] or None
+        :func:`log_hist` of UMIs per detected guide.
+    top_guides : list[TopGuide]
+        The :data:`TOP_GUIDES` most abundant guides, largest first.
+    """
+
+    guide_hist: list[int] | None
+    top_guides: list[TopGuide]
+
+
+class CrisprProbePlots(ProbePlots):
+    """Plot inputs for one probe barcode of a CRISPR run.
+
+    Attributes
+    ----------
+    guide_hist : list[int] or None
+        :func:`log_hist` of UMIs per detected guide under this probe barcode.
+    """
+
+    guide_hist: list[int] | None
+
+
+class CrisprPlots(Plots):
+    """Chart inputs for a CRISPR run.
+
+    Attributes
+    ----------
+    pooled : GuidePooled
+    """
+
+    pooled: GuidePooled
+
+    @classmethod
+    def compute(cls, run: CrisprCytoRun) -> Self:
+        totals = run.guide_totals
+        order = np.argsort(-totals, kind="stable")[:TOP_GUIDES]
+        total = totals.sum()
+
+        def probe_plots(probe: str) -> CrisprProbePlots:
+            umis = run.guide_umis[probe]
+            return CrisprProbePlots(curve=probe_rank_curve(run, probe), guide_hist=log_hist(umis[umis > 0]))
+
+        return cls(
+            pooled=GuidePooled(
+                guide_hist=log_hist(totals[totals > 0]),
+                top_guides=[
+                    TopGuide(guide=run.guide_names[i], umis=int(totals[i]), frac=safe_div(float(totals[i]), float(total)))
+                    for i in order
+                    if totals[i] > 0
+                ],
+            ),
+            probes={probe: probe_plots(probe) for probe in run.stats.probes},
+        )

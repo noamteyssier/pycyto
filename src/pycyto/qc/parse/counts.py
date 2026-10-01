@@ -99,16 +99,6 @@ class FilteredCounts(BaseModel):
     cells: DataFrame[CellCounts]
     feature_totals: np.ndarray
 
-    @property
-    def n_features(self) -> int:
-        """Features in the count matrix."""
-        return len(self.feature_totals)
-
-    @property
-    def features_detected(self) -> np.ndarray:
-        """Boolean mask of features with a nonzero total over all cells."""
-        return self.feature_totals > 0
-
     @classmethod
     def from_h5ad(cls, path: str, chunk_rows: int = 10_000) -> Self:
         """Scan a filtered count h5ad; see :func:`scan_h5ad`.
@@ -125,12 +115,14 @@ class FilteredCounts(BaseModel):
         FilteredCounts
         """
         scan = scan_h5ad(path, chunk_rows)
-        cells = pl.DataFrame({"barcode": scan.barcodes, "n_genes": scan.n_features}).cast({"barcode": pl.Categorical})
+        cells = pl.DataFrame({CellCounts.barcode: scan.barcodes, CellCounts.n_genes: scan.n_features}).cast(
+            {CellCounts.barcode: pl.Categorical}
+        )
         return cls(cells=cells, feature_totals=scan.totals)
 
 
 class CellTable(pa.DataFrameModel):
-    """Schema for :attr:`~pycyto.qc.parse.GexRun.cells`: every called cell in a run, one row each.
+    """Schema for :attr:`~pycyto.qc.parse.GexCytoRun.cells`: every called cell in a run, one row each.
 
     Attributes
     ----------

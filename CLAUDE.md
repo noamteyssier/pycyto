@@ -33,21 +33,20 @@ uv pip install -e .
 - `aggregate.py` - Multi-modal sample aggregation logic
 - `convert.py` - Simple MTX to h5ad conversion utilities
 - `qc/` - Cell Ranger-style QC report for one cyto GEX or CRISPR output directory (`pycyto qc`)
-  - `parse/` - Validated models (pydantic + pandera) for everything cyto writes: `stats.py` (`CytoStats` rooting `stats/*.json`, `stats/reads`, `stats/umi`; `Libraries.workflow` detects the workflow), `counts.py` (`scan_h5ad`, `FilteredCounts`, `CellTable`), `run.py` (`CytoRun` and `GexRun` / `CrisprRun`, stats plus the workflow's `counts/` h5ads). Everything public is re-exported from `qc.parse`.
-  - `metrics.py` / `plots.py` - Shared `ProbeMetrics`, `SummaryMetrics`, `Plots` models with a `compute(run, ...)` classmethod; rank curves and histograms
-  - `gex.py` / `crispr.py` - Workflow modules: subclasses of the shared models adding the workflow's fields, its alert rules, and a `WORKFLOW` bundle (`workflow.Workflow`)
-  - `alerts.py` - `Alert`, thresholds (`THRESH`), the shared rules, and `build_alerts(summary, probes, rules)`
+  - `parse/` - Validated models (pydantic + pandera) for everything cyto writes: `stats.py` (`CytoStats` rooting `stats/*.json`, `stats/reads`, `stats/umi`; `Libraries.workflow` detects the workflow), `counts.py` (`scan_h5ad`, `FilteredCounts`, `CellTable`), `run.py` (`CytoRun` and `GexCytoRun` / `CrisprCytoRun`, stats plus the workflow's `counts/` h5ads). Everything public is re-exported from `qc.parse`.
+  - `metrics.py` / `plots.py` - `ProbeMetrics`, `SummaryMetrics`, `Plots` models with a `compute(run, ...)` classmethod, plus the GEX / CRISPR subclasses adding each workflow's fields; rank curves and histograms
+  - `alerts.py` - `Alert`, thresholds (`THRESH`), and `Alerts` / `GexAlerts` / `CrisprAlerts`: one `Alert | None` field per rule, `compute(metrics)`, `triggered()` for the report's list
   - `render.py` - JSON payload -> HTML and CSVs; inlines `report.css`, `report.js` and `report_<workflow>.js` into `report.html` (loaded via `importlib.resources`)
   - `report.html` / `report.css` / `report.js` - shared markup, styles and rendering engine; `report_gex.js` / `report_crispr.js` - per-workflow `WORKFLOW` config (headline metrics, panels)
-  - `__init__.py` - `collect()` (reads `CytoStats`, picks the `Workflow`, computes metrics/plots/alerts, dumps the payload) and `build_report()`
+  - `__init__.py` - `collect()` (detects the workflow, reads the run, computes `Metrics` / `Plots` / alerts, dumps the payload) and `build_report()`
 
 ## The `qc` Module
 
 **Purpose**: Summarize the quality of a single cyto GEX or CRISPR run the way Cell Ranger's `web_summary.html` does.
 
-**Adding a workflow**: add a module like `gex.py` with a `CytoRun` subclass (reads the workflow's count files in `from_stats`), subclasses of `ProbeMetrics` / `SummaryMetrics` / `Plots` extending `_fields`, an `alerts(summary, probes, add)` rule function, and a `WORKFLOW = Workflow(...)` bundle; register it in `WORKFLOWS` (`qc/__init__.py`) and `parse.FEATURE`; add thresholds to `alerts.Thresholds`; add `report_<workflow>.js` defining `WORKFLOW` (see the `WorkflowConfig` typedef in `report.js`).
+**Adding a workflow**: add a `CytoRun` subclass in `parse/run.py` (its `read(cyto_outdir)` loads `CytoStats` plus the workflow's count files), subclasses of `ProbeMetrics` / `SummaryMetrics` in `metrics.py` and of `Plots` in `plots.py` whose `compute` builds the base model and extends it (`cls(**Base.compute(...).model_dump(), extra=...)`), a `Metrics` subclass bundling the two with a `compute(run)`, and an `Alerts` subclass in `alerts.py` with one `Alert | None` field per rule (built with `Alert.when(...)`); add a `case` for it in `collect()` (`qc/__init__.py`) and register it in `parse.FEATURE`; add a `<Workflow>Thresholds` model and a field for it on `alerts.Thresholds`; add `report_<workflow>.js` defining `WORKFLOW` (see the `WorkflowConfig` typedef in `report.js`).
 
-**CRISPR runs** have no cell calls; `crispr.py` reports guide capture per probe barcode (from `counts/<probe>.h5ad`) and library coverage (guides detected, skew = 90th/10th percentile UMIs per guide). Guide assignments are not reported yet.
+**CRISPR runs** have no cell calls; the report covers guide capture per probe barcode (from `counts/<probe>.h5ad`) and library coverage (guides detected, skew = 90th/10th percentile UMIs per guide). Guide assignments are not reported yet.
 
 **GEX cells** are exactly the barcodes in `counts/<probe>.filt.h5ad` (cyto's own cell calls); the report does no cell calling of its own. Probe barcodes without a filtered h5ad have zero cells.
 
@@ -55,7 +54,7 @@ uv pip install -e .
 
 - Assumes a completed cyto run: the structured outputs (`stats/*.json`, `stats/reads`, `stats/umi`, `.timings.tsv`, CRISPR `counts/*.h5ad`) are read without fallbacks. Everything is loaded and validated up front into `CytoRun`; reads tables use Categorical barcodes so a run fits in about 1 GB for 360 probe barcodes.
 - h5ad files are opened in backed mode (`ad.read_h5ad(path, backed="r")`) and `X` is read in row chunks, so memory stays bounded.
-- GEX per-probe metrics come from `GexRun.cells`, the reads stats (`barcode, n_umis, n_reads`) inner-joined with the filtered cells (`barcode, n_genes`) in polars; a barcode is a cell iff it joined.
+- GEX per-probe metrics come from `GexCytoRun.cells`, the reads stats (`barcode, n_umis, n_reads`) inner-joined with the filtered cells (`barcode, n_genes`) in polars; a barcode is a cell iff it joined.
 - The template (`qc/report.html`) receives the whole payload as JSON in a `<script type="application/json">` block; charts are drawn with Observable Plot (`qc/report.js`). d3 and Plot load from jsDelivr via pinned, SRI-checked `<script>` tags in `report.html`, so charts need an internet connection; offline, charts show a note and the tables/metrics still render. To upgrade, bump the versions there and take the new sha256 hashes from `https://data.jsdelivr.com/v1/packages/npm/<pkg>@<version>?structure=flat`. Chart colors are read from the CSS variables in `qc/report.css` (`color()` in `report.js`) and charts redraw when light/dark mode changes.
 - `report.js` only draws: all metrics are computed in Python, so rules live in one place and are covered by pytest.
 - In `report.js`, HTML is built with the escaping `html` tagged template (wrap trusted markup in `raw()`), chart tooltips/clicks use Plot's pointer (`plot.value`), and nav clicks are delegated from the container via `data-tab`.
