@@ -316,11 +316,55 @@ class Library(BaseModel):
         Sequences in the library, including any expanded variants.
     total_aggr : int
         Distinct features the sequences aggregate to (e.g. genes for ``gex``).
+    mate : str or None
+        Read the library is matched in (``R1`` / ``R2``).
+    position : int or None
+        Offset in the read where matching starts.
+    window : int or None
+        Positions searched around ``position``.
+    exact : bool or None
+        Whether only exact matches count.
     """
 
     name: str
     total_elem: int
     total_aggr: int
+    mate: str | None = None
+    position: int | None = None
+    window: int | None = None
+    exact: bool | None = None
+
+
+class InputRun(BaseModel):
+    """One entry of ``stats/mapping_run.json``: the mapping pass over one input file.
+
+    Attributes
+    ----------
+    input_id : int
+        Index of the input FASTQ (pair).
+    elapsed_sec : float
+        Wall time cyto spent mapping it.
+    """
+
+    input_id: int
+    elapsed_sec: float
+
+
+def read_timings(path: str) -> dict[str, float]:
+    """Elapsed seconds in cyto's ``.timings.tsv``, summed by pipeline module.
+
+    Parameters
+    ----------
+    path : str
+        Path to ``<cyto_outdir>/.timings.tsv`` (columns ``ibu_name``, ``module``, ``elapsed``).
+
+    Returns
+    -------
+    dict[str, float]
+        Module name (``Mapping``, ``Counting``, ...) -> total seconds over every probe barcode.
+    """
+    df = pl.read_csv(path, separator="\t")
+    return dict(df.group_by("module").agg(pl.col("elapsed").sum()).iter_rows())
 
 
 class Libraries(BaseModel):
@@ -392,7 +436,7 @@ def detect_workflow(cyto_outdir: str) -> Workflow:
 
 
 class CytoStats(BaseModel):
-    """Everything cyto writes under ``<cyto_outdir>/stats``.
+    """Everything cyto writes under ``<cyto_outdir>/stats``, plus the root ``.timings.tsv``.
 
     All files are read and validated up front by :meth:`read`.
 
@@ -402,6 +446,10 @@ class CytoStats(BaseModel):
         Run-level read mapping stats.
     library : Libraries
         Reference libraries mapped against.
+    inputs : list[InputRun]
+        Mapping time per input file, from ``mapping_run.json``.
+    timings : dict[str, float]
+        Seconds per pipeline module, from ``.timings.tsv``; see :func:`read_timings`.
     reads : ReadStats
         Per-probe barcode tables.
     umi : UmiStats
@@ -410,6 +458,8 @@ class CytoStats(BaseModel):
 
     mapping: MappingStats
     library: Libraries
+    inputs: list[InputRun]
+    timings: dict[str, float]
     reads: ReadStats
     umi: UmiStats
 
@@ -439,6 +489,8 @@ class CytoStats(BaseModel):
         return cls(
             mapping=MappingStats.from_json(os.path.join(root, "mapping_map.json"), feature=FEATURE[library.workflow]),
             library=library,
+            inputs=TypeAdapter(list[InputRun]).validate_json(Path(os.path.join(root, "mapping_run.json")).read_bytes()),
+            timings=read_timings(os.path.join(cyto_outdir, ".timings.tsv")),
             reads=reads,
             umi=UmiStats.from_dir(os.path.join(root, "umi"), reads.probes),
         )

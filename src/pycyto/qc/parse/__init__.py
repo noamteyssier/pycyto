@@ -14,6 +14,7 @@ from .stats import (
     UNMAPPED_LABELS,
     BarcodeReadStats,
     CytoStats,
+    InputRun,
     Libraries,
     Library,
     MappingStats,
@@ -23,6 +24,7 @@ from .stats import (
     UnmappedReason,
     Workflow,
     detect_workflow,
+    read_timings,
 )
 
 __all__ = [
@@ -37,6 +39,7 @@ __all__ = [
     "FilteredCounts",
     "GexCytoRun",
     "H5adScan",
+    "InputRun",
     "Libraries",
     "Library",
     "MappingStats",
@@ -46,5 +49,6 @@ __all__ = [
     "UnmappedReason",
     "Workflow",
     "detect_workflow",
+    "read_timings",
     "scan_h5ad",
 ]

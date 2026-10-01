@@ -47,6 +47,10 @@ def collect(cyto_outdir: str, title: str | None = None) -> dict:
         "version": version("pycyto"),
         "summary": dump(metrics.summary),
         "alerts": [a.model_dump() for a in alerts.triggered()],
+        "unmapped": [r.model_dump() for r in run.stats.mapping.unmapped],
+        "library": [lib.model_dump() for lib in run.stats.library.entries.values()],
+        "run": [i.model_dump() for i in run.stats.inputs],
+        "timings": run.stats.timings,
         "probes": [dump(p) for p in metrics.probes],
         "plots": dump(plots),
     }

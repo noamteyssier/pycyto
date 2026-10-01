@@ -138,10 +138,16 @@ class SummaryMetrics(BaseModel):
         Probe barcodes in the reference, from ``mapping_lib.json``.
     probe_barcodes_with_reads : int
         Probe barcodes with a reads table.
+    whitelist_size : int
+        Cell barcodes in the whitelist library.
     seq_saturation : float or None
         ``1 - UMIs / mapped reads`` over all barcodes.
     umi_corrected_frac : float or None
         Corrected UMIs / total UMIs over all probe barcodes.
+    mapping_sec : float
+        Wall time of the mapping step, from ``.timings.tsv``.
+    n_inputs : int
+        Input FASTQ files (pairs) mapped.
     """
 
     cyto_outdir: str
@@ -152,8 +158,11 @@ class SummaryMetrics(BaseModel):
     failed_umi_qual_of_total: float | None
     probe_barcodes_in_library: int
     probe_barcodes_with_reads: int
+    whitelist_size: int
     seq_saturation: float | None
     umi_corrected_frac: float | None
+    mapping_sec: float
+    n_inputs: int
 
     @classmethod
     def compute(cls, run: CytoRun, probes: list[ProbeMetrics]) -> Self:
@@ -181,8 +190,11 @@ class SummaryMetrics(BaseModel):
             failed_umi_qual_of_total=safe_div(mapping.unmapped_reads("failed_umi_qual"), mapping.total_reads),
             probe_barcodes_in_library=run.stats.library.entries["probe"].total_elem,
             probe_barcodes_with_reads=len(probes),
+            whitelist_size=run.stats.library.entries["whitelist"].total_elem,
             seq_saturation=1 - sum(p.umis for p in probes) / mapped if mapped else None,
             umi_corrected_frac=safe_div(sum(u.corrected for u in umi), sum(u.total for u in umi)),
+            mapping_sec=run.stats.timings["Mapping"],
+            n_inputs=len(run.stats.inputs),
         )
 
 
