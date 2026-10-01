@@ -3,7 +3,6 @@
 from collections.abc import Callable
 from typing import Literal, NamedTuple
 
-import numpy as np
 from pydantic import BaseModel, ConfigDict
 
 from .metrics import ProbeMetrics, SummaryMetrics
@@ -155,13 +154,11 @@ def build_alerts(summary: SummaryMetrics, probes: list[ProbeMetrics]) -> list[Al
         + _examples(low_frac, lambda p: f"{p.probe} ({p.frac_reads_in_cells:.0%})")
         + ".",
     )
-    if len(called) >= 3:
-        n_cells = np.array([p.cells for p in called], dtype=float)
-        cv = float(n_cells.std(ddof=1) / n_cells.mean())
-        add(
-            _above(cv, THRESH.cells_cv),
-            "Uneven cell counts across probe barcodes",
-            f"Coefficient of variation of cells per probe barcode is {cv:.2f}.",
-        )
+    cv = summary.cells_cv_per_probe
+    add(
+        _above(cv, THRESH.cells_cv),
+        "Uneven cell counts across probe barcodes",
+        f"Coefficient of variation of cells per probe barcode is {cv or 0:.2f}.",
+    )
 
     return alerts or [Alert(level="ok", title="No issues detected", detail="All checked metrics are within expected ranges.")]

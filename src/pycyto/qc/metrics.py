@@ -107,6 +107,9 @@ class SummaryMetrics(BaseModel):
         Probe barcodes with reads but no called cells.
     cells_median_per_probe : float or None
         Median called cells among probe barcodes with cells.
+    cells_cv_per_probe : float or None
+        Coefficient of variation (sample std / mean) of called cells across probe barcodes
+        with cells; None with fewer than three such probe barcodes.
     mean_reads_per_cell, mean_mapped_reads_per_cell : float or None
         ``total_reads`` and ``mapped_reads`` divided by ``estimated_cells``.
     median_umis_per_cell, median_genes_per_cell : float or None
@@ -134,6 +137,7 @@ class SummaryMetrics(BaseModel):
     probe_barcodes_with_cells: int
     probe_barcodes_without_cells: int
     cells_median_per_probe: float | None
+    cells_cv_per_probe: float | None
     mean_reads_per_cell: float | None
     mean_mapped_reads_per_cell: float | None
     median_umis_per_cell: float | None
@@ -161,6 +165,7 @@ class SummaryMetrics(BaseModel):
         umi = run.stats.umi.entries.values()
         counts = list(run.counts.values())
         called = [p for p in probes if p.cells > 0]
+        cells_per_probe = np.array([p.cells for p in called], dtype=float)
         mapped = sum(p.mapped_reads for p in probes)
         n_cells = cells.height
         return cls(
@@ -178,7 +183,8 @@ class SummaryMetrics(BaseModel):
             estimated_cells=n_cells,
             probe_barcodes_with_cells=len(called),
             probe_barcodes_without_cells=len(probes) - len(called),
-            cells_median_per_probe=float(np.median([p.cells for p in called])) if called else None,
+            cells_median_per_probe=float(np.median(cells_per_probe)) if called else None,
+            cells_cv_per_probe=float(cells_per_probe.std(ddof=1) / cells_per_probe.mean()) if len(called) >= 3 else None,
             mean_reads_per_cell=_div(mapping.total_reads, n_cells),
             mean_mapped_reads_per_cell=_div(mapping.mapped_reads, n_cells),
             median_umis_per_cell=cells["n_umis"].median(),

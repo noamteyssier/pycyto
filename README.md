@@ -111,7 +111,7 @@ pycyto qc <cyto_outdir>
 - `--verbose`: Enable detailed logging
 
 **What it reports**:
-- Alerts for low mapping rate, low UMI quality, low fraction of reads in cells, and reads in probe barcodes without cells
+- Alerts for low mapping rate, low UMI quality, low fraction of reads in cells (run-wide and per probe barcode), reads in probe barcodes without cells, low median UMIs per cell, and uneven cell counts across probe barcodes
 - Sequencing metrics: reads, fraction mapped, sequencing saturation, UMI correction
 - Barcode rank plots, pooled and per probe barcode
 

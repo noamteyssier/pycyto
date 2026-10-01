@@ -3,7 +3,29 @@
 import pytest
 from pydantic import ValidationError
 
-from pycyto.qc.parse import CytoStats, Libraries, ProbeUmiStats, ReadStats, UmiStats
+from pycyto.qc.parse import (
+    CytoStats,
+    Libraries,
+    MappingStats,
+    ProbeUmiStats,
+    ReadStats,
+    UmiStats,
+)
+
+
+def test_mapping_stats_pairs_unmapped_reasons():
+    raw = {
+        "total_reads": 100,
+        "mapped_reads": 60,
+        "mapped_reads_frac": 0.6,
+        "unmapped": {"missing_feature": 10, "missing_feature_frac": 0.25, "failed_umi_qual": 30, "failed_umi_qual_frac": 0.75},
+    }
+    m = MappingStats.model_validate(raw)
+    assert [r.reason for r in m.unmapped] == ["failed_umi_qual", "missing_feature"]  # largest first
+    top = m.unmapped[0]
+    assert (top.label, top.reads, top.frac_of_reads, top.frac_of_unmapped) == ("UMI failed quality", 30, 0.3, 0.75)
+    assert m.unmapped_reads("missing_feature") == 10 and m.unmapped_reads("not_a_reason") is None
+    assert MappingStats.model_validate(m.model_dump()) == m  # structured input passes through
 
 
 class TestParsers:
