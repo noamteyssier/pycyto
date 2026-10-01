@@ -15,7 +15,13 @@ import pandera.polars as pa
 import polars as pl
 import scipy.sparse as sp
 from pandera.typing.polars import DataFrame
-from pydantic import BaseModel, ConfigDict, TypeAdapter, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    TypeAdapter,
+    field_validator,
+    model_validator,
+)
 
 from ..config import FLEX_V1_BARCODES, FLEX_V2_BARCODES, FlexBarcode
 
@@ -192,6 +198,30 @@ class UmiStats(BaseModel):
         return cls(entries={p: ProbeUmiStats.from_json(os.path.join(umi_dir, f"{p}.umi.json")) for p in probes})
 
 
+class UnmappedReason(BaseModel):
+    """One reason reads failed to map, from the ``unmapped`` block of ``mapping_map.json``.
+
+    Attributes
+    ----------
+    reason : str
+        cyto's key, e.g. ``missing_feature``.
+    label : str
+        Human-readable label from :data:`UNMAPPED_LABELS`.
+    reads : int
+        Reads that failed this check.
+    frac_of_reads : float or None
+        ``reads / total_reads``.
+    frac_of_unmapped : float
+        Fraction of unmapped reads that failed this check, as reported by cyto.
+    """
+
+    reason: str
+    label: str
+    reads: int
+    frac_of_reads: float | None
+    frac_of_unmapped: float
+
+
 class MappingStats(BaseModel):
     """The ``stats/mapping_map.json`` file: run-level read mapping stats.
 
@@ -205,16 +235,38 @@ class MappingStats(BaseModel):
         Reads with a valid cell barcode, probe barcode, UMI and feature match.
     mapped_reads_frac : float
         ``mapped_reads / total_reads``.
-    unmapped : dict[str, int or float]
-        Why reads failed to map: ``<reason>`` -> read count and ``<reason>_frac`` ->
-        fraction of unmapped reads, for the reasons in :data:`UNMAPPED_LABELS`. A read
-        can fail more than one check.
+    unmapped : list[UnmappedReason]
+        Why reads failed to map, largest first. A read can fail more than one check.
     """
 
     total_reads: int
     mapped_reads: int
     mapped_reads_frac: float
-    unmapped: dict[str, int | float]
+    unmapped: list[UnmappedReason]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _pair_unmapped(cls, data):
+        """Turn cyto's flat ``{reason: reads, reason_frac: frac}`` block into reasons."""
+        if not (isinstance(data, dict) and isinstance(raw := data.get("unmapped"), dict)):
+            return data
+        total = data.get("total_reads")
+        reasons = [
+            {
+                "reason": key,
+                "label": UNMAPPED_LABELS.get(key, key.replace("_", " ")),
+                "reads": reads,
+                "frac_of_reads": reads / total if total else None,
+                "frac_of_unmapped": raw[f"{key}_frac"],
+            }
+            for key, reads in raw.items()
+            if not key.endswith("_frac")
+        ]
+        return {**data, "unmapped": sorted(reasons, key=lambda r: -r["reads"])}
+
+    def unmapped_reads(self, reason: str) -> int | None:
+        """Reads that failed one check, or None if cyto did not report that reason."""
+        return next((r.reads for r in self.unmapped if r.reason == reason), None)
 
     @classmethod
     def from_json(cls, path: str) -> Self:
