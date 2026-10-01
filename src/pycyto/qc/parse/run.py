@@ -6,11 +6,10 @@ from abc import abstractmethod
 from functools import cached_property
 from typing import Self
 
-import numpy as np
 import pandera.polars as pa
 import polars as pl
 from pandera.typing.polars import DataFrame
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, model_validator
 
 from ...config import FlexBarcode
 from .counts import CellTable, FilteredCounts, scan_h5ad
@@ -173,6 +172,42 @@ class GexCytoRun(CytoRun):
         return {p: parts.get((p,), self.cells.clear()) for p in self.stats.probes}
 
 
+class GuideUmis(pa.DataFrameModel):
+    """Schema for :attr:`CrisprCytoRun.guide_umis`: UMIs per guide per probe barcode.
+
+    One row per (probe barcode, guide); every probe barcode has a row for every guide,
+    since all ``counts/<probe>.h5ad`` files share one guide library.
+
+    Attributes
+    ----------
+    probe : pl.Categorical
+        Probe barcode.
+    guide : pl.Categorical
+        Guide name, from the h5ad ``var`` index. Categorical: ~20k names repeated once per
+        probe barcode.
+    umis : float
+        UMIs for the guide summed over every cell barcode under the probe barcode.
+        Float because that is how cyto's matrices are stored; values are whole numbers.
+    """
+
+    probe: pl.Categorical
+    guide: pl.Categorical
+    umis: float = pa.Field(ge=0)
+
+    # The two checks together say every probe barcode has every guide exactly once. They
+    # replace ``Config.unique = ["probe", "guide"]``, which costs ~0.5 GB on a real run.
+    @pa.dataframe_check
+    def guides_unique_within_probe(cls, data: pa.PolarsData) -> pl.LazyFrame:
+        """No guide appears twice under one probe barcode."""
+        per_probe = data.lazyframe.group_by("probe").agg((pl.col("guide").n_unique() == pl.len()).alias("ok"))
+        return per_probe.select(pl.col("ok").all())
+
+    @pa.dataframe_check
+    def every_probe_has_every_guide(cls, data: pa.PolarsData) -> pl.LazyFrame:
+        """The count files share one guide library: rows == probe barcodes x guides."""
+        return data.lazyframe.select(pl.len() == pl.col("probe").n_unique() * pl.col("guide").n_unique())
+
+
 class CrisprCytoRun(CytoRun):
     """A ``cyto workflow crispr`` output directory.
 
@@ -182,35 +217,37 @@ class CrisprCytoRun(CytoRun):
 
     Attributes
     ----------
-    guide_names : list[str]
-        Guides in the library, in ``var`` order. Every probe's count file shares this list.
-    guide_umis : dict[FlexBarcode, np.ndarray]
-        UMIs per guide summed over every barcode, per probe barcode, in
-        :attr:`CytoStats.probes` order.
+    guide_umis : DataFrame[GuideUmis]
+        UMIs per guide per probe barcode, in :attr:`CytoStats.probes` order and, within a
+        probe barcode, in the h5ad ``var`` order.
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    guide_names: list[str]
-    guide_umis: dict[FlexBarcode, np.ndarray]
+    guide_umis: DataFrame[GuideUmis]
 
     @classmethod
     def read(cls, cyto_outdir: str) -> Self:
         stats = CytoStats.read(cyto_outdir)
-        names: list[str] = []
-        umis = {}
+        tables = []
         for probe in stats.probes:
             scan = scan_h5ad(os.path.join(cyto_outdir, "counts", f"{probe}.h5ad"))
-            umis[probe], names = scan.totals, scan.names
+            tables.append(
+                pl.DataFrame({GuideUmis.guide: pl.Series(scan.names, dtype=pl.Categorical), GuideUmis.umis: scan.totals})
+                .with_columns(pl.lit(probe, dtype=pl.Categorical).alias(GuideUmis.probe))
+            )
         return cls(
             path=os.path.abspath(cyto_outdir),
             stats=stats,
             timings=Timings.read(cyto_outdir),
-            guide_names=names,
-            guide_umis=umis,
+            guide_umis=pl.concat(tables).select(GuideUmis.probe, GuideUmis.guide, GuideUmis.umis),
         )
 
     @cached_property
-    def guide_totals(self) -> np.ndarray:
-        """UMIs per guide summed over every probe barcode, in :attr:`guide_names` order."""
-        return np.sum(list(self.guide_umis.values()), axis=0)
+    def guide_totals(self) -> pl.DataFrame:
+        """UMIs per guide summed over every probe barcode: columns ``guide``, ``umis``, in ``var`` order."""
+        return self.guide_umis.group_by(GuideUmis.guide, maintain_order=True).agg(pl.col(GuideUmis.umis).sum())
+
+    @cached_property
+    def guide_umis_by_probe(self) -> dict[str, pl.DataFrame]:
+        """:attr:`guide_umis` split by probe barcode (same columns), one entry per probe barcode."""
+        parts = self.guide_umis.partition_by(GuideUmis.probe, as_dict=True)
+        return {p: parts[(p,)] for p in self.stats.probes}

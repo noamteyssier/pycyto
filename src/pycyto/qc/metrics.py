@@ -14,7 +14,15 @@ from typing import Self
 import numpy as np
 from pydantic import BaseModel, computed_field
 
-from .parse import BarcodeReadStats, CellTable, CrisprCytoRun, CytoRun, GexCytoRun, Well
+from .parse import (
+    BarcodeReadStats,
+    CellTable,
+    CrisprCytoRun,
+    CytoRun,
+    GexCytoRun,
+    GuideUmis,
+    Well,
+)
 from .thresholds import THRESH, Level
 
 
@@ -391,7 +399,8 @@ class CrisprProbeMetrics(ProbeMetrics):
     @classmethod
     def compute(cls, run: CrisprCytoRun, probe: str) -> Self:
         base = ProbeMetrics.compute(run, probe)
-        return cls(**base.model_dump(), guides_detected=int((run.guide_umis[probe] > 0).sum()))
+        umis = run.guide_umis_by_probe[probe][GuideUmis.umis]
+        return cls(**base.model_dump(), guides_detected=int((umis > 0).sum()))
 
 
 class CrisprSummaryMetrics(SummaryMetrics):
@@ -427,7 +436,7 @@ class CrisprSummaryMetrics(SummaryMetrics):
     @classmethod
     def compute(cls, run: CrisprCytoRun, probes: list[ProbeMetrics]) -> Self:
         base = SummaryMetrics.compute(run, probes)
-        totals = run.guide_totals
+        totals = run.guide_totals[GuideUmis.umis].to_numpy()
         p10, p90 = np.percentile(totals, [10, 90])
         return cls(
             **base.model_dump(),

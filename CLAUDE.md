@@ -33,7 +33,7 @@ uv pip install -e .
 - `aggregate.py` - Multi-modal sample aggregation logic
 - `convert.py` - Simple MTX to h5ad conversion utilities
 - `qc/` - Cell Ranger-style QC report for one cyto GEX or CRISPR output directory (`pycyto qc`)
-  - `parse/` - Validated models (pydantic + pandera) for everything cyto writes: `stats.py` (`CytoStats` rooting `stats/*.json` incl. `mapping_run.json`, `stats/reads`, `stats/umi`; `Libraries.workflow` detects the workflow), `counts.py` (`scan_h5ad`, `FilteredCounts`, `CellTable`), `run.py` (`Timings` from the root `.timings.tsv`; `CytoRun` and `GexCytoRun` / `CrisprCytoRun`: stats, timings plus the workflow's `counts/` h5ads). Everything public is re-exported from `qc.parse`.
+  - `parse/` - Validated models (pydantic + pandera) for everything cyto writes: `stats.py` (`CytoStats` rooting `stats/*.json` incl. `mapping_run.json`, `stats/reads`, `stats/umi`; `Libraries.workflow` detects the workflow), `counts.py` (`scan_h5ad`, `FilteredCounts`, `CellTable`), `run.py` (`Timings` from the root `.timings.tsv`; `CytoRun` and `GexCytoRun` / `CrisprCytoRun`: stats, timings plus the workflow's `counts/` h5ads as validated frames, `CellTable` and `GuideUmis`). Everything public is re-exported from `qc.parse`.
   - `metrics.py` / `plots.py` - `ProbeMetrics`, `SummaryMetrics`, `Plots` models with a `compute(run, ...)` classmethod, plus the GEX / CRISPR subclasses adding each workflow's fields; rank curves and histograms
   - `thresholds.py` - `THRESH`: alert and per-probe `flag` cutoffs, shared ones plus a `gex` / `crispr` block
   - `alerts.py` - `Alert`, and `Alerts` / `GexAlerts` / `CrisprAlerts`: one `Alert | None` field per rule, `compute(metrics)`, `triggered()` for the report's list

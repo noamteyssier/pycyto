@@ -8,7 +8,7 @@ They assume a completed cyto run: every file is present and well-formed.
 """
 
 from .counts import CellCounts, CellTable, FilteredCounts, H5adScan, scan_h5ad
-from .run import CrisprCytoRun, CytoRun, GexCytoRun, TimingRow, Timings
+from .run import CrisprCytoRun, CytoRun, GexCytoRun, GuideUmis, TimingRow, Timings
 from .stats import (
     FEATURE,
     UNMAPPED_LABELS,
@@ -38,6 +38,7 @@ __all__ = [
     "CytoStats",
     "FilteredCounts",
     "GexCytoRun",
+    "GuideUmis",
     "H5adScan",
     "InputRun",
     "Libraries",
