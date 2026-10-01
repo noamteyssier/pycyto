@@ -8,7 +8,7 @@ import polars as pl
 
 
 def _asset(name: str) -> str:
-    return resources.files("pycyto.qc").joinpath(name).read_text(encoding="utf-8")
+    return resources.files("pycyto.qc").joinpath("web", name).read_text(encoding="utf-8")
 
 
 def render_html(payload: dict) -> str:

@@ -37,8 +37,8 @@ uv pip install -e .
   - `metrics.py` / `plots.py` - `ProbeMetrics`, `SummaryMetrics`, `Plots` models with a `compute(run, ...)` classmethod, plus the GEX / CRISPR subclasses adding each workflow's fields; rank curves and histograms
   - `thresholds.py` - `THRESH`: alert and per-probe `flag` cutoffs, shared ones plus a `gex` / `crispr` block
   - `alerts.py` - `Alert`, and `Alerts` / `GexAlerts` / `CrisprAlerts`: one `Alert | None` field per rule, `compute(metrics)`, `triggered()` for the report's list
-  - `render.py` - JSON payload -> HTML and CSVs; inlines `report.css`, `report.js` and `report_<workflow>.js` into `report.html` (loaded via `importlib.resources`)
-  - `report.html` / `report.css` / `report.js` - shared markup, styles and rendering engine; `report_gex.js` / `report_crispr.js` - per-workflow `WORKFLOW` config (headline metrics, probe-table columns, plate-map metrics, panels)
+  - `render.py` - JSON payload -> HTML and CSVs; inlines the `web/` assets into `report.html` (loaded via `importlib.resources`)
+  - `web/` - the browser side: `report.html` / `report.css` / `report.js` (shared markup, styles and rendering engine) and `report_gex.js` / `report_crispr.js` (per-workflow `WORKFLOW` config: headline metrics, probe-table columns, plate-map metrics, panels)
   - `report.py` - `Report`: the payload as a model, one field per key `report.js` reads; `Report.compute(cyto_outdir)` detects the workflow, reads the run and computes `Metrics` / `Plots` / `Alerts`; `Report.write(output, csv)` renders the HTML and CSVs via `render.py`
   - `__init__.py` - re-exports `Report`; the CLI (`__main__.py qc`) runs `Report.compute(...).write(...)` and logs triggered alerts
 
@@ -426,6 +426,8 @@ Run tests with:
 ```bash
 pytest tests/
 ```
+
+The `pycyto qc` tests live in `tests/qc/`, mirroring the package: `conftest.py` builds synthetic GEX and CRISPR cyto runs (constants and writers in `helpers.py`); `test_parse.py`, `test_plots.py`, `test_report.py` cover modules, `test_gex.py` / `test_crispr.py` the end-to-end payload per workflow.
 
 Example configurations are available in `examples/`:
 

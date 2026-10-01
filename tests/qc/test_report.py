@@ -10,7 +10,7 @@ from typer.testing import CliRunner
 from pycyto.__main__ import app
 from pycyto.qc import Report
 
-from .qc_helpers import PROBES
+from .helpers import PROBES
 
 
 class TestReportWrite:

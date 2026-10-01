@@ -4,7 +4,7 @@ import pytest
 
 from pycyto.qc import Report
 
-from .qc_helpers import N_GENES
+from .helpers import N_GENES
 
 
 @pytest.fixture(scope="module")

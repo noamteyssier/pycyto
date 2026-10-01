@@ -5,7 +5,7 @@ import pytest
 
 from pycyto.qc import Report
 
-from .qc_helpers import N_GUIDES, UNUSED_GUIDES
+from .helpers import N_GUIDES, UNUSED_GUIDES
 
 
 @pytest.fixture(scope="module")
