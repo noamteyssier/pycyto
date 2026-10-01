@@ -16,7 +16,12 @@ from pydantic import (
     model_validator,
 )
 
-from ...config import FLEX_V1_BARCODES, FLEX_V2_BARCODES, FlexBarcode
+from ...config import (
+    FLEX_V1_BARCODES,
+    FLEX_V2_BARCODE_RE,
+    FLEX_V2_BARCODES,
+    FlexBarcode,
+)
 
 # Rank of each known barcode within its format, so `ReadStats._probe_sort_key` groups by prefix
 # (V1) or plate position (V2). FLEX_V1_BARCODES is generated prefix-interleaved
@@ -39,6 +44,30 @@ UNMAPPED_LABELS = {
     "missing_whitelist": "Cell barcode not in whitelist",
     "umi_truncated": "UMI truncated",
 }
+
+
+class Well(BaseModel):
+    """A Flex-V2 probe barcode's position on its 96-well plate, for the report's plate map.
+
+    Attributes
+    ----------
+    set : str
+        Probe set, ``A``-``D``; one plate each.
+    row : str
+        ``A``-``H``.
+    col : int
+        1-12.
+    """
+
+    set: str
+    row: str
+    col: int
+
+    @classmethod
+    def from_barcode(cls, barcode: str) -> Self | None:
+        """The well for a Flex-V2 barcode (``A-B07`` -> set A, row B, column 7); None for other formats."""
+        m = FLEX_V2_BARCODE_RE.match(barcode)
+        return cls(set=m[1], row=m[2], col=int(m[3])) if m else None
 
 
 class BarcodeReadStats(pa.DataFrameModel):
@@ -350,23 +379,6 @@ class InputRun(BaseModel):
     elapsed_sec: float
 
 
-def read_timings(path: str) -> dict[str, float]:
-    """Elapsed seconds in cyto's ``.timings.tsv``, summed by pipeline module.
-
-    Parameters
-    ----------
-    path : str
-        Path to ``<cyto_outdir>/.timings.tsv`` (columns ``ibu_name``, ``module``, ``elapsed``).
-
-    Returns
-    -------
-    dict[str, float]
-        Module name (``Mapping``, ``Counting``, ...) -> total seconds over every probe barcode.
-    """
-    df = pl.read_csv(path, separator="\t")
-    return dict(df.group_by("module").agg(pl.col("elapsed").sum()).iter_rows())
-
-
 class Libraries(BaseModel):
     """The ``stats/mapping_lib.json`` file: every reference library, keyed by name.
 
@@ -436,7 +448,7 @@ def detect_workflow(cyto_outdir: str) -> Workflow:
 
 
 class CytoStats(BaseModel):
-    """Everything cyto writes under ``<cyto_outdir>/stats``, plus the root ``.timings.tsv``.
+    """Everything cyto writes under ``<cyto_outdir>/stats``.
 
     All files are read and validated up front by :meth:`read`.
 
@@ -448,8 +460,6 @@ class CytoStats(BaseModel):
         Reference libraries mapped against.
     inputs : list[InputRun]
         Mapping time per input file, from ``mapping_run.json``.
-    timings : dict[str, float]
-        Seconds per pipeline module, from ``.timings.tsv``; see :func:`read_timings`.
     reads : ReadStats
         Per-probe barcode tables.
     umi : UmiStats
@@ -459,7 +469,6 @@ class CytoStats(BaseModel):
     mapping: MappingStats
     library: Libraries
     inputs: list[InputRun]
-    timings: dict[str, float]
     reads: ReadStats
     umi: UmiStats
 
@@ -490,7 +499,6 @@ class CytoStats(BaseModel):
             mapping=MappingStats.from_json(os.path.join(root, "mapping_map.json"), feature=FEATURE[library.workflow]),
             library=library,
             inputs=TypeAdapter(list[InputRun]).validate_json(Path(os.path.join(root, "mapping_run.json")).read_bytes()),
-            timings=read_timings(os.path.join(cyto_outdir, ".timings.tsv")),
             reads=reads,
             umi=UmiStats.from_dir(os.path.join(root, "umi"), reads.probes),
         )

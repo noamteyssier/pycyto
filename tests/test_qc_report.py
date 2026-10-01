@@ -8,16 +8,16 @@ import polars as pl
 from typer.testing import CliRunner
 
 from pycyto.__main__ import app
-from pycyto.qc import build_report
+from pycyto.qc import Report
 
 from .qc_helpers import PROBES
 
 
-class TestBuildReport:
+class TestReportWrite:
     def test_writes_html(self, cyto_dir, tmp_path):
         root, _ = cyto_dir
         out = str(tmp_path / "report.html")
-        build_report(root, output=out, title="unit-test", write_csv=False)
+        Report.compute(root, title="unit-test").write(out, csv=False)
         html = open(out).read()
         m = re.search(r'<script id="data" type="application/json">(.*?)</script>', html, re.S)
         assert m is not None
@@ -35,7 +35,7 @@ class TestBuildReport:
 
     def test_writes_csvs(self, cyto_dir, tmp_path):
         root, _ = cyto_dir
-        build_report(root, output=str(tmp_path / "report.html"))
+        Report.compute(root).write(str(tmp_path / "report.html"))
         summary = pl.read_csv(str(tmp_path / "report_metrics_summary.csv"))
         probes = pl.read_csv(str(tmp_path / "report_probe_metrics.csv"))
         assert summary.height == 1

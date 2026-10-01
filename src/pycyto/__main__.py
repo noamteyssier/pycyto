@@ -151,13 +151,17 @@ def qc(
     """Generate a Cell Ranger-style QC report for a cyto GEX or CRISPR run"""
     _setup_logging(verbose=verbose)
 
-    from .qc import build_report
+    from .qc import Report
 
     try:
-        build_report(cyto_outdir, output=output, title=title, write_csv=csv)
+        report = Report.compute(cyto_outdir, title)
+        report.write(output, csv=csv)
     except (FileNotFoundError, ValueError) as e:
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(code=1)
+    for alert in report.alerts:
+        if alert.level != "ok":
+            logging.getLogger("pycyto.qc").warning(f"{alert.title}: {alert.detail}")
 
 
 @app.command()

@@ -122,8 +122,7 @@ class Plots(BaseModel):
         :data:`LOG_BINS`, so the report can label histogram axes.
     probes : dict[FlexBarcode, ProbePlots]
         Per-probe-barcode plots, in :attr:`CytoStats.probes` order. Holds the workflow's
-        :class:`ProbePlots` subclass; :func:`pycyto.qc.collect` dumps with
-        ``serialize_as_any`` so its extra fields reach the report.
+        :class:`ProbePlots` subclass; :meth:`pycyto.qc.Report.payload` dumps its extra fields.
     """
 
     log_bins: list[float] = LOG_BINS.tolist()

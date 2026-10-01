@@ -1,5 +1,6 @@
 """``pycyto.qc.parse``: cyto metadata readers and workflow detection."""
 
+import pandera.polars as pa
 import pytest
 from pydantic import ValidationError
 
@@ -9,6 +10,7 @@ from pycyto.qc.parse import (
     MappingStats,
     ProbeUmiStats,
     ReadStats,
+    Timings,
     UmiStats,
     detect_workflow,
 )
@@ -40,6 +42,19 @@ def test_umi_stats_keys_must_be_flex_barcodes():
     assert set(UmiStats(entries={"BC001": umi, "A-A01": umi, "A_A01": umi}).entries) == {"BC001", "A-A01", "A_A01"}
     with pytest.raises(ValidationError, match="BC017"):
         UmiStats(entries={"BC001": umi, "BC017": umi})
+
+
+def test_timings(tmp_path):
+    path = tmp_path / ".timings.tsv"
+    path.write_text("ibu_name\tmodule\telapsed\nAll-Barcodes\tMapping\t10.5\nA-A01\tCounting\t1\nA-A02\tCounting\t2\n")
+    t = Timings.read(str(tmp_path))
+    assert t.by_module == {"Mapping": 10.5, "Counting": 3.0} and t.mapping == 10.5
+    path.write_text("ibu_name\tmodule\telapsed\nA-A01\tCounting\t1\n")
+    with pytest.raises(ValidationError, match="no Mapping step"):
+        Timings.read(str(tmp_path))
+    path.write_text("ibu_name\tmodule\telapsed\nAll-Barcodes\tMapping\t-1\n")
+    with pytest.raises(pa.errors.SchemaError):
+        Timings.read(str(tmp_path))
 
 
 def test_workflow(cyto_dir, crispr_dir):

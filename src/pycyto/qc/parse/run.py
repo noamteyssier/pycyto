@@ -1,4 +1,4 @@
-"""A whole cyto output directory: the shared ``stats/`` plus each workflow's count files."""
+"""A whole cyto output directory: the shared ``stats/`` and ``.timings.tsv`` plus each workflow's count files."""
 
 import logging
 import os
@@ -7,9 +7,10 @@ from functools import cached_property
 from typing import Self
 
 import numpy as np
+import pandera.polars as pa
 import polars as pl
 from pandera.typing.polars import DataFrame
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from ...config import FlexBarcode
 from .counts import CellTable, FilteredCounts, scan_h5ad
@@ -18,8 +19,74 @@ from .stats import CytoStats
 logger = logging.getLogger("pycyto.qc")
 
 
+class TimingRow(pa.DataFrameModel):
+    """Schema for cyto's ``.timings.tsv``: one row per pipeline module per probe barcode.
+
+    Attributes
+    ----------
+    ibu_name : str
+        Probe barcode the step ran for, or ``All-Barcodes`` for run-wide steps (``Mapping``).
+    module : str
+        Pipeline module, e.g. ``Mapping``, ``Counting``, ``ConversionH5ad``.
+    elapsed : float
+        Wall seconds. Non-negative.
+    """
+
+    ibu_name: str
+    module: str
+    elapsed: float = pa.Field(ge=0)
+
+
+class Timings(BaseModel):
+    """The ``.timings.tsv`` file at the run root, summed by pipeline module.
+
+    Attributes
+    ----------
+    by_module : dict[str, float]
+        Module name -> total seconds over every probe barcode. Whatever modules cyto
+        wrote; the report draws them all. Must include ``Mapping``.
+    """
+
+    by_module: dict[str, float]
+
+    @model_validator(mode="after")
+    def _has_mapping(self) -> Self:
+        if "Mapping" not in self.by_module:
+            raise ValueError(f"no Mapping step in .timings.tsv (modules: {sorted(self.by_module)})")
+        return self
+
+    @property
+    def mapping(self) -> float:
+        """Seconds spent in the ``Mapping`` step, the one module the report relies on."""
+        return self.by_module["Mapping"]
+
+    @classmethod
+    def read(cls, cyto_outdir: str) -> Self:
+        """Read and validate ``<cyto_outdir>/.timings.tsv``.
+
+        Parameters
+        ----------
+        cyto_outdir : str
+            A cyto output directory.
+
+        Returns
+        -------
+        Timings
+
+        Raises
+        ------
+        pandera.errors.SchemaError
+            If a column is missing or an elapsed time is negative.
+        pydantic.ValidationError
+            If there is no ``Mapping`` row.
+        """
+        dtypes = {name: col.type for name, col in TimingRow.to_schema().dtypes.items()}
+        rows = TimingRow.validate(pl.read_csv(os.path.join(cyto_outdir, ".timings.tsv"), separator="\t", schema_overrides=dtypes))
+        return cls(by_module=dict(rows.group_by(TimingRow.module).agg(pl.col(TimingRow.elapsed).sum()).iter_rows()))
+
+
 class CytoRun(BaseModel):
-    """A cyto output directory: the shared ``stats/`` plus whatever the workflow writes.
+    """A cyto output directory: the shared ``stats/`` and ``.timings.tsv`` plus whatever the workflow writes.
 
     :class:`GexCytoRun` and :class:`CrisprCytoRun` add the workflow's count files; this base
     holds what every workflow has.
@@ -30,15 +97,18 @@ class CytoRun(BaseModel):
         Absolute path to the directory.
     stats : CytoStats
         Everything under ``stats/``.
+    timings : Timings
+        Seconds per pipeline module, from ``.timings.tsv`` at the root.
     """
 
     path: str
     stats: CytoStats
+    timings: Timings
 
     @classmethod
     @abstractmethod
     def read(cls, cyto_outdir: str) -> Self:
-        """Load and validate a cyto output directory: ``stats/`` plus the workflow's count files.
+        """Load and validate a cyto output directory: ``stats/``, ``.timings.tsv`` and the workflow's count files.
 
         Parameters
         ----------
@@ -71,6 +141,7 @@ class GexCytoRun(CytoRun):
         return cls(
             path=os.path.abspath(cyto_outdir),
             stats=stats,
+            timings=Timings.read(cyto_outdir),
             counts={p: FilteredCounts.from_h5ad(f) for p, f in paths.items() if os.path.exists(f)},
         )
 
@@ -131,7 +202,13 @@ class CrisprCytoRun(CytoRun):
         for probe in stats.probes:
             scan = scan_h5ad(os.path.join(cyto_outdir, "counts", f"{probe}.h5ad"))
             umis[probe], names = scan.totals, scan.names
-        return cls(path=os.path.abspath(cyto_outdir), stats=stats, guide_names=names, guide_umis=umis)
+        return cls(
+            path=os.path.abspath(cyto_outdir),
+            stats=stats,
+            timings=Timings.read(cyto_outdir),
+            guide_names=names,
+            guide_umis=umis,
+        )
 
     @cached_property
     def guide_totals(self) -> np.ndarray:
