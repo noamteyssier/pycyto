@@ -8,6 +8,7 @@ Python utilities for cyto - format conversion and sample aggregation.
 
 - **convert**: Transform MTX format to h5ad (AnnData)
 - **aggregate**: Combine multi-probe cyto outputs into unified sample-level datasets
+- **qc**: Generate a Cell Ranger-style HTML QC report for a cyto GEX or CRISPR run
 
 ## Installation
 
@@ -91,6 +92,38 @@ output_directory/
     ├── sample_name_assignments.parquet   # Guide assignments per cell
     └── sample_name_reads.parquet         # Read/UMI statistics per barcode
 ```
+
+### qc
+
+Generate a Cell Ranger-style QC report (similar to `web_summary.html`) for a single `cyto workflow gex` or `cyto workflow crispr` output directory. The workflow is detected automatically from the output directory.
+
+```bash
+pycyto qc <cyto_outdir>
+```
+
+**Arguments**:
+- `cyto_outdir`: One cyto GEX or CRISPR output directory (the one containing `stats/` and `counts/`)
+
+**Options**:
+- `--output PATH`: HTML report path (default: `<cyto_outdir>/qc_report.html`)
+- `--title TEXT`: Report title (default: name of `cyto_outdir`)
+- `--csv / --no-csv`: Also write `<output>_metrics_summary.csv` and `<output>_probe_metrics.csv` (default: enabled)
+- `--verbose`: Enable detailed logging
+
+**What it reports (both workflows)**:
+- Alerts for low mapping rate and low UMI quality, plus workflow-specific alerts (GEX: low fraction of reads in cells run-wide and per probe barcode, reads in probe barcodes without cells, low median UMIs per cell, uneven cell counts; CRISPR: guides missing from the library, uneven guide coverage)
+- Sequencing metrics: reads, fraction mapped, sequencing saturation, UMI correction
+- Barcode rank plots, pooled and per probe barcode
+- A 96-well plate map per probe set for Flex-V2 (`A-A01`…`D-H12`), or a bar chart for other names, plus a sortable per-probe table
+- Read fate (mapped vs. each unmapped reason), reference libraries, and runtimes
+
+**GEX runs** add cell metrics: estimated cells, mean reads per cell, median genes and UMIs per cell, fraction of reads in cells, and UMI/gene histograms. **Cells** are exactly the barcodes in cyto's `counts/<probe>.filt.h5ad`; probe barcodes without a filtered h5ad have no cells.
+
+**CRISPR runs** have no cell calls, so the report covers guide capture instead: guides detected out of the library, guide UMIs, median UMIs per guide, guide skew (90th / 10th percentile of UMIs per guide), a UMIs-per-guide histogram and the most abundant guides. Guide assignments (`assignments/`) are not reported yet.
+
+**Inputs read** (all under `cyto_outdir`): `stats/mapping_{map,lib,run}.json`, `stats/reads/*.reads.tsv.zst`, `stats/umi/*.umi.json`, `.timings.tsv`; for GEX also `counts/*.filt.h5ad`, for CRISPR `counts/*.h5ad`. The directory must be from a completed cyto run.
+
+The HTML report is a single file. Charts load d3 and Observable Plot from cdn.jsdelivr.net, so viewing them needs an internet connection; offline, the tables and metrics still render.
 
 ## Configuration Format
 

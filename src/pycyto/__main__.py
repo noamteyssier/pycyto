@@ -128,6 +128,43 @@ def aggregate(
 
 
 @app.command()
+def qc(
+    cyto_outdir: Annotated[
+        str, typer.Argument(help="Path to a single `cyto workflow gex` or `crispr` output directory")
+    ],
+    output: Annotated[
+        str | None,
+        typer.Option(help="Output HTML path [default: <cyto_outdir>/qc_report.html]"),
+    ] = None,
+    title: Annotated[
+        str | None,
+        typer.Option(help="Report title [default: name of cyto_outdir]"),
+    ] = None,
+    csv: Annotated[
+        bool,
+        typer.Option(
+            help="Also write <output>_metrics_summary.csv and <output>_probe_metrics.csv"
+        ),
+    ] = True,
+    verbose: Annotated[bool, typer.Option(help="Enable verbose logging")] = False,
+):
+    """Generate a Cell Ranger-style QC report for a cyto GEX or CRISPR run"""
+    _setup_logging(verbose=verbose)
+
+    from .qc import Report
+
+    try:
+        report = Report.compute(cyto_outdir, title)
+        report.write(output, csv=csv)
+    except (FileNotFoundError, ValueError) as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(code=1)
+    for alert in report.alerts:
+        if alert.level != "ok":
+            logging.getLogger("pycyto.qc").warning(f"{alert.title}: {alert.detail}")
+
+
+@app.command()
 def version():
     from importlib.metadata import version
 

@@ -1,8 +1,10 @@
 import json
 import os
 import re
+from typing import Annotated
 
 import polars as pl
+from pydantic import AfterValidator
 
 KNOWN_LIBMODES = ["gex", "crispr", "ab"]
 
@@ -29,6 +31,16 @@ FLEX_V2_BARCODES_UNDERSCORE = [bc.replace("-", "_") for bc in FLEX_V2_BARCODES]
 # Combined list for validation
 KNOWN_PROBE_SET = FLEX_V1_PROBE_SETS + FLEX_V2_SETS
 KNOWN_BARCODES = FLEX_V1_BARCODES + FLEX_V2_BARCODES + FLEX_V2_BARCODES_UNDERSCORE
+
+
+def validate_flex_barcode(bc: str) -> str:
+    if bc not in KNOWN_BARCODES:
+        raise ValueError(f"{bc!r} is not a Flex V1 (BC/CR/AB 001-016) or Flex V2 ([ABCD]-[A-H][01-12]) barcode")
+    return bc
+
+
+FlexBarcode = Annotated[str, AfterValidator(validate_flex_barcode)]
+"""Pydantic field type for a probe barcode in either Flex format."""
 EXPECTED_SAMPLE_KEYS = [
     "experiment",
     "sample",
@@ -47,12 +59,16 @@ def _is_flex_v1_barcode(barcode: str) -> bool:
     return re.match(r"^(BC|CR|AB)0\d{2}$", barcode) is not None
 
 
+FLEX_V2_BARCODE_RE = re.compile(r"^([ABCD])[-_]([ABCDEFGH])(0[1-9]|1[0-2])$")
+"""Flex-V2 barcode ``<set>-<row><col>`` (underscore separator also accepted); groups: set, row, column."""
+
+
 def _is_flex_v2_barcode(barcode: str) -> bool:
     """Check if barcode follows Flex-V2 format: A-A01, B-C05, D-H12, etc.
 
     Also accepts underscore separator: A_A01, B_C05, D_H12
     """
-    return re.match(r"^[ABCD][-_][ABCDEFGH](0[1-9]|1[0-2])$", barcode) is not None
+    return FLEX_V2_BARCODE_RE.match(barcode) is not None
 
 
 def _detect_barcode_format(barcodes: list[str]) -> str:
