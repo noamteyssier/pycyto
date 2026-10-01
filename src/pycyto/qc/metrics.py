@@ -1,6 +1,7 @@
 """Per-probe and run-level QC metrics for a ``cyto workflow gex`` run.
 
 Everything here is a transformation of a parsed :class:`~pycyto.qc.parse.CytoRun`.
+Chart inputs live in :mod:`pycyto.qc.plots`.
 """
 
 from typing import Self
@@ -14,34 +15,6 @@ from .parse import CytoRun
 
 def _div(a, b) -> float | None:
     return a / b if a is not None and b else None
-
-
-def rank_curve(umis_desc: np.ndarray, is_cell_desc: np.ndarray, n_points: int = 300) -> list:
-    """Barcode-rank curve downsampled to ~n_points log-spaced ranks.
-
-    Parameters
-    ----------
-    umis_desc : np.ndarray
-        UMI count per barcode, sorted descending.
-    is_cell_desc : np.ndarray
-        Whether each barcode is a called cell, in the same order.
-    n_points : int
-        Target number of points on the curve.
-
-    Returns
-    -------
-    list
-        Points ``[rank, umis, fraction of barcodes in the segment that are cells]``,
-        where each point summarizes the barcodes ranked ``(previous rank, rank]``.
-    """
-    n = len(umis_desc)
-    if n == 0:
-        return []
-    ranks = np.unique(np.clip(np.round(np.logspace(0, np.log10(n), n_points)), 1, n)).astype(int)
-    prev = np.concatenate([[0], ranks[:-1]])
-    csum = np.concatenate([[0], np.cumsum(is_cell_desc)])
-    frac = (csum[ranks] - csum[prev]) / (ranks - prev)
-    return [[int(r), int(u), round(float(f), 3)] for r, u, f in zip(ranks, umis_desc[ranks - 1], frac)]
 
 
 class ProbeMetrics(BaseModel):
@@ -193,37 +166,3 @@ class SummaryMetrics(BaseModel):
             frac_reads_in_cells=_div(cells["n_reads"].sum(), mapped),
             background_probe_read_frac=_div(sum(p.mapped_reads for p in probes if p.cells == 0), mapped),
         )
-
-
-class ProbePlots(BaseModel):
-    """Plot inputs for one probe barcode, drawn by the report's JavaScript.
-
-    Attributes
-    ----------
-    curve : list[tuple[int, int, float]]
-        Barcode-rank curve from :func:`rank_curve`: ``(rank, umis, cell fraction)`` points.
-    """
-
-    curve: list[tuple[int, int, float]]
-
-    @classmethod
-    def compute(cls, run: CytoRun, probe: str) -> Self:
-        """Plot inputs for one probe barcode.
-
-        Parameters
-        ----------
-        run : CytoRun
-        probe : str
-            A member of ``run.stats.probes``.
-
-        Returns
-        -------
-        ProbePlots
-        """
-        cell_barcodes = run.cells.filter(pl.col("probe") == probe)["barcode"]
-        ranked = (
-            run.stats.reads.entries[probe]
-            .with_columns(is_cell=pl.col("barcode").is_in(cell_barcodes.implode()))
-            .sort("n_umis", descending=True)
-        )
-        return cls(curve=rank_curve(ranked["n_umis"].to_numpy(), ranked["is_cell"].to_numpy()))
