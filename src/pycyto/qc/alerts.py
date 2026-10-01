@@ -2,92 +2,16 @@
 
 :class:`Alerts` holds the rules every workflow shares, one field per rule;
 :class:`GexAlerts` / :class:`CrisprAlerts` add their own. ``Alerts.triggered()`` is the
-list the report shows. Cutoffs live in :data:`THRESH`, grouped the same way.
+list the report shows. Cutoffs live in :mod:`pycyto.qc.thresholds`, grouped the same way.
 """
 
 from collections.abc import Callable
-from typing import Literal, NamedTuple, Self
+from typing import Self
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
 
-from .metrics import CrisprMetrics, GexMetrics, GexProbeMetrics, Metrics, ProbeMetrics
-
-Level = Literal["ok", "warn", "error"]
-
-
-# ============================================================================
-# Thresholds
-# ============================================================================
-class Band(NamedTuple):
-    """A two-level threshold: cross ``warn`` for a warning, ``error`` for an error."""
-
-    warn: float
-    error: float
-
-
-class GexThresholds(BaseModel):
-    """Cutoffs for :class:`GexAlerts`.
-
-    Attributes
-    ----------
-    frac_reads_in_cells : Band
-        Fraction of mapped reads in cells, run-wide; below -> warn / error. The error
-        level is also the per-probe-barcode cutoff.
-    background_probe_read_frac : float
-        Fraction of mapped reads in probe barcodes without cells; above -> warn.
-    median_umis_per_cell : float
-        Per-probe-barcode median UMIs per cell; below -> warn.
-    cells_cv : float
-        Coefficient of variation of cells across probe barcodes with cells; above -> warn.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    frac_reads_in_cells: Band = Band(warn=0.70, error=0.50)
-    background_probe_read_frac: float = 0.05
-    median_umis_per_cell: float = 500
-    cells_cv: float = 0.5
-
-
-class CrisprThresholds(BaseModel):
-    """Cutoffs for :class:`CrisprAlerts`.
-
-    Attributes
-    ----------
-    frac_guides_detected : Band
-        Fraction of library guides with at least one UMI; below -> warn / error.
-    guide_skew_ratio : float
-        90th / 10th percentile of UMIs per guide; above -> warn.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    frac_guides_detected: Band = Band(warn=0.90, error=0.75)
-    guide_skew_ratio: float = 10
-
-
-class Thresholds(BaseModel):
-    """Alert cutoffs: the shared ones, plus one block per workflow.
-
-    Attributes
-    ----------
-    mapped_frac : Band
-        Fraction of reads mapped; below -> warn / error.
-    failed_umi_qual_of_total : float
-        Fraction of all reads failing UMI quality; above -> warn.
-    gex : GexThresholds
-    crispr : CrisprThresholds
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    mapped_frac: Band = Band(warn=0.70, error=0.50)
-    failed_umi_qual_of_total: float = 0.10
-    gex: GexThresholds = GexThresholds()
-    crispr: CrisprThresholds = CrisprThresholds()
-
-
-THRESH = Thresholds()
+from .metrics import CrisprMetrics, GexMetrics, Metrics, ProbeMetrics
+from .thresholds import THRESH, Band, Level
 
 
 # ============================================================================
@@ -245,9 +169,8 @@ class GexAlerts(Alerts):
         frac_reads_in_cells = summary.frac_reads_in_cells
         background_frac = summary.background_probe_read_frac
         cells_cv = summary.cells_cv_per_probe
-        called = [p for p in metrics.probes if p.cells > 0]
-        low_umis = cls._below_median_umis(called)
-        low_frac = cls._below_frac_reads_in_cells(called, exclude={p.probe for p in low_umis})
+        low_umis = [p for p in metrics.probes if p.low_median_umis]
+        low_frac = [p for p in metrics.probes if p.low_frac_reads_in_cells and not p.low_median_umis]
         return cls(
             **base.model_dump(),
             low_reads_in_cells=Alert.when(
@@ -283,25 +206,6 @@ class GexAlerts(Alerts):
                 lambda: f"Coefficient of variation of cells per probe barcode is {cells_cv:.2f}.",
             ),
         )
-
-    @staticmethod
-    def _below_median_umis(called: list[GexProbeMetrics]) -> list[GexProbeMetrics]:
-        """Probe barcodes with cells whose median UMIs per cell is below the cutoff."""
-        cutoff = THRESH.gex.median_umis_per_cell
-        return [p for p in called if p.median_umis_per_cell is not None and p.median_umis_per_cell < cutoff]
-
-    @staticmethod
-    def _below_frac_reads_in_cells(called: list[GexProbeMetrics], exclude: set[str]) -> list[GexProbeMetrics]:
-        """Probe barcodes with cells whose fraction of reads in cells is below the error level.
-
-        ``exclude`` lists probe barcodes already reported by another rule.
-        """
-        cutoff = THRESH.gex.frac_reads_in_cells.error
-        return [
-            p
-            for p in called
-            if p.frac_reads_in_cells is not None and p.frac_reads_in_cells < cutoff and p.probe not in exclude
-        ]
 
 
 # ============================================================================
