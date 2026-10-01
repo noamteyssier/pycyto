@@ -10,7 +10,7 @@ from typing import Self
 
 from pydantic import BaseModel
 
-from .metrics import CrisprMetrics, GexMetrics, GexProbeMetrics, Metrics, ProbeMetrics
+from .metrics import CrisprMetrics, GexMetrics, Metrics, ProbeMetrics
 from .thresholds import THRESH, Band, Level
 
 
@@ -169,9 +169,8 @@ class GexAlerts(Alerts):
         frac_reads_in_cells = summary.frac_reads_in_cells
         background_frac = summary.background_probe_read_frac
         cells_cv = summary.cells_cv_per_probe
-        called = [p for p in metrics.probes if p.cells > 0]
-        low_umis = cls._below_median_umis(called)
-        low_frac = cls._below_frac_reads_in_cells(called, exclude={p.probe for p in low_umis})
+        low_umis = [p for p in metrics.probes if p.low_median_umis]
+        low_frac = [p for p in metrics.probes if p.low_frac_reads_in_cells and not p.low_median_umis]
         return cls(
             **base.model_dump(),
             low_reads_in_cells=Alert.when(
@@ -207,25 +206,6 @@ class GexAlerts(Alerts):
                 lambda: f"Coefficient of variation of cells per probe barcode is {cells_cv:.2f}.",
             ),
         )
-
-    @staticmethod
-    def _below_median_umis(called: list[GexProbeMetrics]) -> list[GexProbeMetrics]:
-        """Probe barcodes with cells whose median UMIs per cell is below the cutoff."""
-        cutoff = THRESH.gex.median_umis_per_cell
-        return [p for p in called if p.median_umis_per_cell is not None and p.median_umis_per_cell < cutoff]
-
-    @staticmethod
-    def _below_frac_reads_in_cells(called: list[GexProbeMetrics], exclude: set[str]) -> list[GexProbeMetrics]:
-        """Probe barcodes with cells whose fraction of reads in cells is below the error level.
-
-        ``exclude`` lists probe barcodes already reported by another rule.
-        """
-        cutoff = THRESH.gex.frac_reads_in_cells.error
-        return [
-            p
-            for p in called
-            if p.frac_reads_in_cells is not None and p.frac_reads_in_cells < cutoff and p.probe not in exclude
-        ]
 
 
 # ============================================================================

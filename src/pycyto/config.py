@@ -59,12 +59,16 @@ def _is_flex_v1_barcode(barcode: str) -> bool:
     return re.match(r"^(BC|CR|AB)0\d{2}$", barcode) is not None
 
 
+FLEX_V2_BARCODE_RE = re.compile(r"^([ABCD])[-_]([ABCDEFGH])(0[1-9]|1[0-2])$")
+"""Flex-V2 barcode ``<set>-<row><col>`` (underscore separator also accepted); groups: set, row, column."""
+
+
 def _is_flex_v2_barcode(barcode: str) -> bool:
     """Check if barcode follows Flex-V2 format: A-A01, B-C05, D-H12, etc.
 
     Also accepts underscore separator: A_A01, B_C05, D_H12
     """
-    return re.match(r"^[ABCD][-_][ABCDEFGH](0[1-9]|1[0-2])$", barcode) is not None
+    return FLEX_V2_BARCODE_RE.match(barcode) is not None
 
 
 def _detect_barcode_format(barcodes: list[str]) -> str:

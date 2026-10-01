@@ -232,9 +232,9 @@ function drawSummaryPlots() {
 // ============================================================================
 // Probe barcodes tab
 // ============================================================================
-// Flex-V2 probe barcodes are <set>-<row><col>, e.g. A-A01 (underscore also accepted)
-const WELL = /^([A-D])[-_]([A-H])(\d{2})$/;
-const isPlate = PROBES.length > 0 && PROBES.every((p) => WELL.test(p.probe));
+// Python gives every Flex-V2 probe barcode its plate position (p.well = {set, row, col}); other
+// formats have none, and the tab then draws bars instead of plates.
+const isPlate = PROBES.length > 0 && PROBES.every((p) => p.well);
 
 function drawPlates() {
   const host = $("#plates"), key = $("#plate-metric").value, [label, format, logCapable] = WORKFLOW.plateMetrics[key];
@@ -251,10 +251,7 @@ function drawPlates() {
     return;
   }
 
-  const wells = PROBES.map((p) => {
-    const [, set, row, col] = p.probe.match(WELL);
-    return { ...p, set, row, col: +col, value: value(p) };
-  });
+  const wells = PROBES.map((p) => ({ ...p, ...p.well, value: value(p) }));
   const sets = [...new Set(wells.map((w) => w.set))].sort();
   const grid = sets.flatMap((set) => [..."ABCDEFGH"].flatMap((row) => d3.range(1, 13).map((col) => ({ set, row, col }))));
   const cell = { x: "col", y: "row", fx: "set", inset: 1, rx: 3 };
