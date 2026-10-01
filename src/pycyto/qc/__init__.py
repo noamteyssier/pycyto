@@ -8,6 +8,7 @@ import logging
 import os
 from importlib.metadata import version
 
+from .alerts import build_alerts
 from .metrics import ProbeMetrics, SummaryMetrics
 from .parse import CytoRun
 from .plots import Plots
@@ -23,12 +24,14 @@ def collect(cyto_outdir: str, title: str | None = None) -> dict:
     run = CytoRun.read(cyto_outdir)
     logger.info(f"Computing QC for a cyto {run.stats.workflow} run with {len(run.stats.probes)} probe barcodes")
     probes = [ProbeMetrics.compute(run, probe) for probe in run.stats.probes]
+    summary = SummaryMetrics.compute(run, probes)
     return {
         "workflow": run.stats.workflow,
         "title": title or os.path.basename(run.path),
         "generated": dt.datetime.now().isoformat(sep=" ", timespec="seconds"),
         "version": version("pycyto"),
-        "summary": SummaryMetrics.compute(run, probes).model_dump(),
+        "summary": summary.model_dump(),
+        "alerts": [a.model_dump() for a in build_alerts(summary, probes)],
         "probes": [p.model_dump() for p in probes],
         "plots": Plots.compute(run).model_dump(),
     }
@@ -49,4 +52,7 @@ def build_report(
     if write_csv:
         paths = write_csvs(payload, os.path.splitext(output)[0])
         logger.info(f"Wrote metrics: {', '.join(paths)}")
+    for alert in payload["alerts"]:
+        if alert["level"] != "ok":
+            logger.warning(f"{alert['title']}: {alert['detail']}")
     return output
