@@ -1,15 +1,23 @@
-"""Cell Ranger-style alerts, derived from the computed metrics."""
+"""Cell Ranger-style alerts, derived from the computed metrics.
+
+:class:`Alerts` holds the rules every workflow shares, one field per rule;
+:class:`GexAlerts` / :class:`CrisprAlerts` add their own. ``Alerts.triggered()`` is the
+list the report shows. Cutoffs live in :data:`THRESH`, grouped the same way.
+"""
 
 from collections.abc import Callable
-from typing import Literal, NamedTuple
+from typing import Literal, NamedTuple, Self
 
 from pydantic import BaseModel, ConfigDict
 
-from .metrics import ProbeMetrics, SummaryMetrics
+from .metrics import CrisprMetrics, GexMetrics, GexProbeMetrics, Metrics, ProbeMetrics
 
 Level = Literal["ok", "warn", "error"]
 
 
+# ============================================================================
+# Thresholds
+# ============================================================================
 class Band(NamedTuple):
     """A two-level threshold: cross ``warn`` for a warning, ``error`` for an error."""
 
@@ -17,15 +25,11 @@ class Band(NamedTuple):
     error: float
 
 
-class Thresholds(BaseModel):
-    """Alert thresholds.
+class GexThresholds(BaseModel):
+    """Cutoffs for :class:`GexAlerts`.
 
     Attributes
     ----------
-    mapped_frac : Band
-        Fraction of reads mapped; below -> warn / error.
-    failed_umi_qual_of_total : float
-        Fraction of all reads failing UMI quality; above -> warn.
     frac_reads_in_cells : Band
         Fraction of mapped reads in cells, run-wide; below -> warn / error. The error
         level is also the per-probe-barcode cutoff.
@@ -39,17 +43,56 @@ class Thresholds(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    mapped_frac: Band = Band(warn=0.70, error=0.50)
-    failed_umi_qual_of_total: float = 0.10
     frac_reads_in_cells: Band = Band(warn=0.70, error=0.50)
     background_probe_read_frac: float = 0.05
     median_umis_per_cell: float = 500
     cells_cv: float = 0.5
 
 
+class CrisprThresholds(BaseModel):
+    """Cutoffs for :class:`CrisprAlerts`.
+
+    Attributes
+    ----------
+    frac_guides_detected : Band
+        Fraction of library guides with at least one UMI; below -> warn / error.
+    guide_skew_ratio : float
+        90th / 10th percentile of UMIs per guide; above -> warn.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    frac_guides_detected: Band = Band(warn=0.90, error=0.75)
+    guide_skew_ratio: float = 10
+
+
+class Thresholds(BaseModel):
+    """Alert cutoffs: the shared ones, plus one block per workflow.
+
+    Attributes
+    ----------
+    mapped_frac : Band
+        Fraction of reads mapped; below -> warn / error.
+    failed_umi_qual_of_total : float
+        Fraction of all reads failing UMI quality; above -> warn.
+    gex : GexThresholds
+    crispr : CrisprThresholds
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    mapped_frac: Band = Band(warn=0.70, error=0.50)
+    failed_umi_qual_of_total: float = 0.10
+    gex: GexThresholds = GexThresholds()
+    crispr: CrisprThresholds = CrisprThresholds()
+
+
 THRESH = Thresholds()
 
 
+# ============================================================================
+# Alerts and the helpers rules are written with
+# ============================================================================
 class Alert(BaseModel):
     """One alert shown in the report's banner.
 
@@ -66,99 +109,238 @@ class Alert(BaseModel):
     title: str
     detail: str
 
+    @classmethod
+    def when(cls, level: Level | None, title: str, detail: Callable[[], str]) -> Self | None:
+        """The alert, or None when ``level`` is None (the rule did not trigger).
 
-def _below(value: float | None, warn: float, error: float) -> Level | None:
+        Parameters
+        ----------
+        level : Level or None
+            From :func:`level_below` / :func:`level_above`, or a rule's own test.
+        title : str
+        detail : Callable[[], str]
+            Builds the detail text; only called when the rule triggered, so it may assume
+            the values it formats are not None.
+
+        Returns
+        -------
+        Alert or None
+        """
+        return cls(level=level, title=title, detail=detail()) if level else None
+
+
+NO_ISSUES = Alert(level="ok", title="No issues detected", detail="All checked metrics are within expected ranges.")
+"""What the report shows when no rule triggered."""
+
+
+def level_below(value: float | None, band: Band) -> Level | None:
+    """``error`` / ``warn`` when ``value`` falls below the band's cutoffs."""
     if value is None:
         return None
-    return "error" if value < error else "warn" if value < warn else None
+    return "error" if value < band.error else "warn" if value < band.warn else None
 
 
-def _above(value: float | None, warn: float) -> Level | None:
+def level_above(value: float | None, warn: float) -> Level | None:
+    """``warn`` when ``value`` exceeds ``warn``."""
     return "warn" if value is not None and value > warn else None
 
 
-def _examples(probes: list[ProbeMetrics], fmt: Callable[[ProbeMetrics], str], limit: int = 10) -> str:
+def examples(probes: list[ProbeMetrics], fmt: Callable[[ProbeMetrics], str], limit: int = 10) -> str:
+    """Comma-separated ``fmt(probe)`` for the first ``limit`` probes, with an ellipsis if cut."""
     return ", ".join(fmt(p) for p in probes[:limit]) + (" …" if len(probes) > limit else "")
 
 
-def build_alerts(summary: SummaryMetrics, probes: list[ProbeMetrics]) -> list[Alert]:
-    """Alerts for a run.
+# ============================================================================
+# Shared
+# ============================================================================
+class Alerts(BaseModel):
+    """The alert rules every workflow runs, one field per rule.
 
-    Parameters
+    A field is the :class:`Alert` when its rule triggered, None otherwise. Workflow
+    subclasses add their rules as further fields and override ``compute`` to build the
+    base model and extend it.
+
+    Attributes
     ----------
-    summary : SummaryMetrics
-    probes : list[ProbeMetrics]
-        One per probe barcode.
-
-    Returns
-    -------
-    list[Alert]
-        Every triggered alert, or a single ``ok`` alert when none triggered.
+    low_mapped_frac : Alert or None
+        Fraction of reads mapped below :attr:`Thresholds.mapped_frac`.
+    failed_umi_qual : Alert or None
+        Fraction of all reads failing UMI quality above :attr:`Thresholds.failed_umi_qual_of_total`.
     """
-    alerts: list[Alert] = []
 
-    def add(level: Level | None, title: str, detail: str) -> None:
-        if level:
-            alerts.append(Alert(level=level, title=title, detail=detail))
+    low_mapped_frac: Alert | None
+    failed_umi_qual: Alert | None
 
-    mf = summary.mapped_reads_frac
-    add(
-        _below(mf, *THRESH.mapped_frac),
-        "Low fraction of reads mapped",
-        f"{mf or 0:.1%} of reads mapped (expected ≥ {THRESH.mapped_frac.warn:.0%}). "
-        f"The biggest unmapped category is “{summary.top_unmapped_reason}”.",
-    )
-    fu = summary.failed_umi_qual_of_total
-    add(
-        _above(fu, THRESH.failed_umi_qual_of_total),
-        "Many reads failed UMI quality",
-        f"{fu or 0:.1%} of all reads failed the UMI quality filter. "
-        "This can point to low base quality in R1.",
-    )
-    fr = summary.frac_reads_in_cells
-    add(
-        _below(fr, *THRESH.frac_reads_in_cells),
-        "Low fraction of reads in cells",
-        f"{fr or 0:.1%} of mapped reads are in cell barcodes "
-        f"(expected ≥ {THRESH.frac_reads_in_cells.warn:.0%}).",
-    )
-    bg = summary.background_probe_read_frac
-    add(
-        _above(bg, THRESH.background_probe_read_frac),
-        "Reads in probe barcodes without cells",
-        f"{bg or 0:.1%} of mapped reads went to {summary.probe_barcodes_without_cells} probe "
-        "barcodes with no cells. Check for unexpected probe barcodes or barcode hopping.",
-    )
+    @classmethod
+    def compute(cls, metrics: Metrics) -> Self:
+        """Run every rule against a run's metrics.
 
-    called = [p for p in probes if p.cells > 0]
-    low = [p for p in called if p.median_umis_per_cell is not None and p.median_umis_per_cell < THRESH.median_umis_per_cell]
-    add(
-        "warn" if low else None,
-        "Low median UMIs per cell",
-        f"{len(low)} probe barcode(s) with cells have a median below "
-        f"{THRESH.median_umis_per_cell:g} UMIs per cell: "
-        + _examples(low, lambda p: f"{p.probe} ({p.median_umis_per_cell:.0f})")
-        + ".",
-    )
-    min_frac = THRESH.frac_reads_in_cells.error
-    low_probes = {p.probe for p in low}
-    low_frac = [
-        p
-        for p in called
-        if p.frac_reads_in_cells is not None and p.frac_reads_in_cells < min_frac and p.probe not in low_probes
-    ]
-    add(
-        "warn" if low_frac else None,
-        "Probe barcodes with low reads in cells",
-        f"{len(low_frac)} probe barcode(s) have <{min_frac:.0%} of reads in cells: "
-        + _examples(low_frac, lambda p: f"{p.probe} ({p.frac_reads_in_cells:.0%})")
-        + ".",
-    )
-    cv = summary.cells_cv_per_probe
-    add(
-        _above(cv, THRESH.cells_cv),
-        "Uneven cell counts across probe barcodes",
-        f"Coefficient of variation of cells per probe barcode is {cv or 0:.2f}.",
-    )
+        Parameters
+        ----------
+        metrics : Metrics
 
-    return alerts or [Alert(level="ok", title="No issues detected", detail="All checked metrics are within expected ranges.")]
+        Returns
+        -------
+        Alerts
+        """
+        summary = metrics.summary
+        mapped_frac = summary.mapped_reads_frac
+        failed_umi_qual = summary.failed_umi_qual_of_total
+        return cls(
+            low_mapped_frac=Alert.when(
+                level_below(mapped_frac, THRESH.mapped_frac),
+                "Low fraction of reads mapped",
+                lambda: f"{mapped_frac:.1%} of reads mapped (expected ≥ {THRESH.mapped_frac.warn:.0%}). "
+                f"The biggest unmapped category is “{summary.top_unmapped_reason}”.",
+            ),
+            failed_umi_qual=Alert.when(
+                level_above(failed_umi_qual, THRESH.failed_umi_qual_of_total),
+                "Many reads failed UMI quality",
+                lambda: f"{failed_umi_qual:.1%} of all reads failed the UMI quality filter. "
+                "This can point to low base quality in R1.",
+            ),
+        )
+
+    def triggered(self) -> list[Alert]:
+        """Every alert that fired, in field order, or :data:`NO_ISSUES` when none did.
+
+        This is the list the report's banner shows.
+        """
+        return [a for name in type(self).model_fields if (a := getattr(self, name))] or [NO_ISSUES]
+
+
+# ============================================================================
+# GEX
+# ============================================================================
+class GexAlerts(Alerts):
+    """Alert rules for a GEX run: cells, reads in cells, background probe barcodes.
+
+    Attributes
+    ----------
+    low_reads_in_cells : Alert or None
+        Run-wide fraction of mapped reads in cells below :attr:`GexThresholds.frac_reads_in_cells`.
+    background_probe_reads : Alert or None
+        Fraction of mapped reads in probe barcodes without cells above
+        :attr:`GexThresholds.background_probe_read_frac`.
+    low_median_umis : Alert or None
+        Probe barcodes whose median UMIs per cell is below :attr:`GexThresholds.median_umis_per_cell`.
+    low_probe_reads_in_cells : Alert or None
+        Probe barcodes with cells whose fraction of reads in cells is below the error level of
+        :attr:`GexThresholds.frac_reads_in_cells`, excluding those already in ``low_median_umis``.
+    uneven_cells : Alert or None
+        Coefficient of variation of cells per probe barcode above :attr:`GexThresholds.cells_cv`.
+    """
+
+    low_reads_in_cells: Alert | None
+    background_probe_reads: Alert | None
+    low_median_umis: Alert | None
+    low_probe_reads_in_cells: Alert | None
+    uneven_cells: Alert | None
+
+    @classmethod
+    def compute(cls, metrics: GexMetrics) -> Self:
+        base = Alerts.compute(metrics)
+        summary = metrics.summary
+        thresh = THRESH.gex
+        frac_reads_in_cells = summary.frac_reads_in_cells
+        background_frac = summary.background_probe_read_frac
+        cells_cv = summary.cells_cv_per_probe
+        called = [p for p in metrics.probes if p.cells > 0]
+        low_umis = cls._below_median_umis(called)
+        low_frac = cls._below_frac_reads_in_cells(called, exclude={p.probe for p in low_umis})
+        return cls(
+            **base.model_dump(),
+            low_reads_in_cells=Alert.when(
+                level_below(frac_reads_in_cells, thresh.frac_reads_in_cells),
+                "Low fraction of reads in cells",
+                lambda: f"{frac_reads_in_cells:.1%} of mapped reads are in cell barcodes "
+                f"(expected ≥ {thresh.frac_reads_in_cells.warn:.0%}).",
+            ),
+            background_probe_reads=Alert.when(
+                level_above(background_frac, thresh.background_probe_read_frac),
+                "Reads in probe barcodes without cells",
+                lambda: f"{background_frac:.1%} of mapped reads went to {summary.probe_barcodes_without_cells} probe "
+                "barcodes with no cells. Check for unexpected probe barcodes or barcode hopping.",
+            ),
+            low_median_umis=Alert.when(
+                "warn" if low_umis else None,
+                "Low median UMIs per cell",
+                lambda: f"{len(low_umis)} probe barcode(s) with cells have a median below "
+                f"{thresh.median_umis_per_cell:g} UMIs per cell: "
+                + examples(low_umis, lambda p: f"{p.probe} ({p.median_umis_per_cell:.0f})")
+                + ".",
+            ),
+            low_probe_reads_in_cells=Alert.when(
+                "warn" if low_frac else None,
+                "Probe barcodes with low reads in cells",
+                lambda: f"{len(low_frac)} probe barcode(s) have <{thresh.frac_reads_in_cells.error:.0%} of reads in cells: "
+                + examples(low_frac, lambda p: f"{p.probe} ({p.frac_reads_in_cells:.0%})")
+                + ".",
+            ),
+            uneven_cells=Alert.when(
+                level_above(cells_cv, thresh.cells_cv),
+                "Uneven cell counts across probe barcodes",
+                lambda: f"Coefficient of variation of cells per probe barcode is {cells_cv:.2f}.",
+            ),
+        )
+
+    @staticmethod
+    def _below_median_umis(called: list[GexProbeMetrics]) -> list[GexProbeMetrics]:
+        """Probe barcodes with cells whose median UMIs per cell is below the cutoff."""
+        cutoff = THRESH.gex.median_umis_per_cell
+        return [p for p in called if p.median_umis_per_cell is not None and p.median_umis_per_cell < cutoff]
+
+    @staticmethod
+    def _below_frac_reads_in_cells(called: list[GexProbeMetrics], exclude: set[str]) -> list[GexProbeMetrics]:
+        """Probe barcodes with cells whose fraction of reads in cells is below the error level.
+
+        ``exclude`` lists probe barcodes already reported by another rule.
+        """
+        cutoff = THRESH.gex.frac_reads_in_cells.error
+        return [
+            p
+            for p in called
+            if p.frac_reads_in_cells is not None and p.frac_reads_in_cells < cutoff and p.probe not in exclude
+        ]
+
+
+# ============================================================================
+# CRISPR
+# ============================================================================
+class CrisprAlerts(Alerts):
+    """Alert rules for a CRISPR run: guide library coverage and evenness.
+
+    Attributes
+    ----------
+    guides_missing : Alert or None
+        Fraction of library guides detected below :attr:`CrisprThresholds.frac_guides_detected`.
+    uneven_guides : Alert or None
+        90th / 10th percentile ratio of UMIs per guide above :attr:`CrisprThresholds.guide_skew_ratio`.
+    """
+
+    guides_missing: Alert | None
+    uneven_guides: Alert | None
+
+    @classmethod
+    def compute(cls, metrics: CrisprMetrics) -> Self:
+        base = Alerts.compute(metrics)
+        summary = metrics.summary
+        thresh = THRESH.crispr
+        frac_detected = summary.frac_guides_detected
+        skew = summary.guide_skew_ratio
+        return cls(
+            **base.model_dump(),
+            guides_missing=Alert.when(
+                level_below(frac_detected, thresh.frac_guides_detected),
+                "Guides missing from the library",
+                lambda: f"Only {frac_detected:.1%} of the {summary.guides_in_library:,} guides in the library have "
+                f"any UMIs (expected ≥ {thresh.frac_guides_detected.warn:.0%}). Check library "
+                "complexity and guide capture.",
+            ),
+            uneven_guides=Alert.when(
+                level_above(skew, thresh.guide_skew_ratio),
+                "Uneven guide coverage",
+                lambda: f"The 90th/10th percentile ratio of UMIs per guide is {skew:.1f} "
+                f"(expected ≤ {thresh.guide_skew_ratio:g}). A few guides may dominate the library.",
+            ),
+        )

@@ -1,6 +1,9 @@
-"""Cell Ranger-style QC reports for a single cyto output directory (``cyto workflow gex``).
+"""Cell Ranger-style QC reports for a single ``cyto workflow gex`` or ``crispr`` output directory.
 
-Entry point: :func:`build_report` (CLI: ``pycyto qc``).
+Entry point: :func:`build_report` (CLI: ``pycyto qc``). The workflow is detected from
+``stats/mapping_lib.json``; :func:`collect` picks that workflow's run, metric and plot
+models and alert rules (:mod:`pycyto.qc.parse`, :mod:`pycyto.qc.metrics`,
+:mod:`pycyto.qc.plots`, :mod:`pycyto.qc.alerts`).
 """
 
 import datetime as dt
@@ -8,10 +11,10 @@ import logging
 import os
 from importlib.metadata import version
 
-from .alerts import build_alerts
-from .metrics import ProbeMetrics, SummaryMetrics
-from .parse import CytoRun
-from .plots import Plots
+from .alerts import CrisprAlerts, GexAlerts
+from .metrics import CrisprMetrics, GexMetrics
+from .parse import CrisprCytoRun, GexCytoRun, detect_workflow
+from .plots import CrisprPlots, GexPlots
 from .render import render_html, write_csvs
 
 __all__ = ["build_report", "collect"]
@@ -21,19 +24,31 @@ logger = logging.getLogger("pycyto.qc")
 
 def collect(cyto_outdir: str, title: str | None = None) -> dict:
     """Compute every metric and plot input for the report; returns the report payload."""
-    run = CytoRun.read(cyto_outdir)
-    logger.info(f"Computing QC for a cyto {run.stats.workflow} run with {len(run.stats.probes)} probe barcodes")
-    probes = [ProbeMetrics.compute(run, probe) for probe in run.stats.probes]
-    summary = SummaryMetrics.compute(run, probes)
+    workflow = detect_workflow(cyto_outdir)
+    logger.info(f"Computing QC for a cyto {workflow} run")
+    match workflow:
+        case "gex":
+            run = GexCytoRun.read(cyto_outdir)
+            metrics = GexMetrics.compute(run)
+            plots = GexPlots.compute(run)
+            alerts = GexAlerts.compute(metrics)
+        case "crispr":
+            run = CrisprCytoRun.read(cyto_outdir)
+            metrics = CrisprMetrics.compute(run)
+            plots = CrisprPlots.compute(run)
+            alerts = CrisprAlerts.compute(metrics)
+    # serialize_as_any: nested fields are typed with the shared base models (e.g.
+    # ``Plots.probes``) but hold the workflow's subclasses; dump all of their fields
+    dump = lambda m: m.model_dump(serialize_as_any=True)
     return {
-        "workflow": run.stats.workflow,
+        "workflow": workflow,
         "title": title or os.path.basename(run.path),
         "generated": dt.datetime.now().isoformat(sep=" ", timespec="seconds"),
         "version": version("pycyto"),
-        "summary": summary.model_dump(),
-        "alerts": [a.model_dump() for a in build_alerts(summary, probes)],
-        "probes": [p.model_dump() for p in probes],
-        "plots": Plots.compute(run).model_dump(),
+        "summary": dump(metrics.summary),
+        "alerts": [a.model_dump() for a in alerts.triggered()],
+        "probes": [dump(p) for p in metrics.probes],
+        "plots": dump(plots),
     }
 
 

@@ -24,7 +24,7 @@ class TestFilteredCounts:
         np.testing.assert_allclose(fc.feature_totals, dense.sum(0))
         assert fc.cells.equals(fc_small.cells)
         np.testing.assert_allclose(fc.feature_totals, fc_small.feature_totals)
-        assert fc.n_features == adata.n_vars
+        assert len(fc.feature_totals) == adata.n_vars
         # probe suffix stripped from obs names
         barcodes = fc.cells["barcode"].cast(pl.String)
         assert barcodes.to_list() == [n.split("-", 1)[0] for n in adata.obs_names]

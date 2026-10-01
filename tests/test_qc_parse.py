@@ -10,6 +10,7 @@ from pycyto.qc.parse import (
     ProbeUmiStats,
     ReadStats,
     UmiStats,
+    detect_workflow,
 )
 
 
@@ -41,7 +42,8 @@ def test_umi_stats_keys_must_be_flex_barcodes():
         UmiStats(entries={"BC001": umi, "BC017": umi})
 
 
-def test_workflow(cyto_dir):
-    assert CytoStats.read(cyto_dir[0]).workflow == "gex"
+def test_workflow(cyto_dir, crispr_dir):
+    assert detect_workflow(cyto_dir[0]) == CytoStats.read(cyto_dir[0]).workflow == "gex"
+    assert detect_workflow(crispr_dir[0]) == CytoStats.read(crispr_dir[0]).workflow == "crispr"
     with pytest.raises(ValueError):
         _ = CytoStats.model_construct(library=Libraries.model_construct(entries={"probe": None})).workflow
