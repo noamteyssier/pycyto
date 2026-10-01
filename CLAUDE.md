@@ -33,19 +33,20 @@ uv pip install -e .
 - `aggregate.py` - Multi-modal sample aggregation logic
 - `convert.py` - Simple MTX to h5ad conversion utilities
 - `qc/` - Cell Ranger-style QC report for one cyto GEX or CRISPR output directory (`pycyto qc`)
-  - `parse/` - Validated models (pydantic + pandera) for everything cyto writes: `stats.py` (`CytoStats` rooting `stats/*.json` incl. `mapping_run.json`, `stats/reads`, `stats/umi` and the root `.timings.tsv`; `Libraries.workflow` detects the workflow), `counts.py` (`scan_h5ad`, `FilteredCounts`, `CellTable`), `run.py` (`CytoRun` and `GexCytoRun` / `CrisprCytoRun`, stats plus the workflow's `counts/` h5ads). Everything public is re-exported from `qc.parse`.
+  - `parse/` - Validated models (pydantic + pandera) for everything cyto writes: `stats.py` (`CytoStats` rooting `stats/*.json` incl. `mapping_run.json`, `stats/reads`, `stats/umi`; `Libraries.workflow` detects the workflow), `counts.py` (`scan_h5ad`, `FilteredCounts`, `CellTable`), `run.py` (`Timings` from the root `.timings.tsv`; `CytoRun` and `GexCytoRun` / `CrisprCytoRun`: stats, timings plus the workflow's `counts/` h5ads as validated frames, `CellTable` and `GuideUmis`). Everything public is re-exported from `qc.parse`.
   - `metrics.py` / `plots.py` - `ProbeMetrics`, `SummaryMetrics`, `Plots` models with a `compute(run, ...)` classmethod, plus the GEX / CRISPR subclasses adding each workflow's fields; rank curves and histograms
   - `thresholds.py` - `THRESH`: alert and per-probe `flag` cutoffs, shared ones plus a `gex` / `crispr` block
   - `alerts.py` - `Alert`, and `Alerts` / `GexAlerts` / `CrisprAlerts`: one `Alert | None` field per rule, `compute(metrics)`, `triggered()` for the report's list
-  - `render.py` - JSON payload -> HTML and CSVs; inlines `report.css`, `report.js` and `report_<workflow>.js` into `report.html` (loaded via `importlib.resources`)
-  - `report.html` / `report.css` / `report.js` - shared markup, styles and rendering engine; `report_gex.js` / `report_crispr.js` - per-workflow `WORKFLOW` config (headline metrics, probe-table columns, plate-map metrics, panels)
-  - `__init__.py` - `collect()` (detects the workflow, reads the run, computes `Metrics` / `Plots` / alerts, dumps the payload) and `build_report()`
+  - `render.py` - JSON payload -> HTML and CSVs; inlines the `web/` assets into `report.html` (loaded via `importlib.resources`)
+  - `web/` - the browser side: `report.html` / `report.css` / `report.js` (shared markup, styles and rendering engine) and `report_gex.js` / `report_crispr.js` (per-workflow `WORKFLOW` config: headline metrics, probe-table columns, plate-map metrics, panels)
+  - `report.py` - `Report`: the payload as a model, one field per key `report.js` reads; `Report.compute(cyto_outdir)` detects the workflow, reads the run and computes `Metrics` / `Plots` / `Alerts`; `Report.write(output, csv)` renders the HTML and CSVs via `render.py`
+  - `__init__.py` - re-exports `Report`; the CLI (`__main__.py qc`) runs `Report.compute(...).write(...)` and logs triggered alerts
 
 ## The `qc` Module
 
 **Purpose**: Summarize the quality of a single cyto GEX or CRISPR run the way Cell Ranger's `web_summary.html` does.
 
-**Adding a workflow**: add a `CytoRun` subclass in `parse/run.py` (its `read(cyto_outdir)` loads `CytoStats` plus the workflow's count files), subclasses of `ProbeMetrics` / `SummaryMetrics` in `metrics.py` and of `Plots` in `plots.py` whose `compute` builds the base model and extends it (`cls(**Base.compute(...).model_dump(), extra=...)`), a `Metrics` subclass bundling the two with a `compute(run)`, and an `Alerts` subclass in `alerts.py` with one `Alert | None` field per rule (built with `Alert.when(...)`); add a `case` for it in `collect()` (`qc/__init__.py`) and register it in `parse.FEATURE`; add a `<Workflow>Thresholds` model and a field for it on `thresholds.Thresholds`; add `report_<workflow>.js` defining `WORKFLOW` (headline metrics, `columns`, `plateMetrics`, `tableToggle`, panels; see the `WorkflowConfig` typedef in `report.js`). A per-probe status dot comes from the workflow's `ProbeMetrics` subclass `flag` (a `computed_field` on GEX, a `None` field on CRISPR); `ProbeMetrics.well` gives Flex-V2 plate positions so `report.js` never parses barcodes.
+**Adding a workflow**: add a `CytoRun` subclass in `parse/run.py` (its `read(cyto_outdir)` loads `CytoStats` plus the workflow's count files), subclasses of `ProbeMetrics` / `SummaryMetrics` in `metrics.py` and of `Plots` in `plots.py` whose `compute` builds the base model and extends it (`cls(**Base.compute(...).model_dump(), extra=...)`), a `Metrics` subclass bundling the two with a `compute(run)`, and an `Alerts` subclass in `alerts.py` with one `Alert | None` field per rule (built with `Alert.when(...)`); add a `case` for it in `Report.compute()` (`qc/report.py`) and register it in `parse.FEATURE`; add a `<Workflow>Thresholds` model and a field for it on `thresholds.Thresholds`; add `report_<workflow>.js` defining `WORKFLOW` (headline metrics, `columns`, `plateMetrics`, `tableToggle`, panels; see the `WorkflowConfig` typedef in `report.js`). A per-probe status dot comes from the workflow's `ProbeMetrics` subclass `flag` (a `computed_field` on GEX, a `None` field on CRISPR); `ProbeMetrics.well` (`parse.Well`) gives Flex-V2 plate positions so `report.js` never parses barcodes.
 
 **CRISPR runs** have no cell calls; the report covers guide capture per probe barcode (from `counts/<probe>.h5ad`) and library coverage (guides detected, skew = 90th/10th percentile UMIs per guide). Guide assignments are not reported yet.
 
@@ -425,6 +426,8 @@ Run tests with:
 ```bash
 pytest tests/
 ```
+
+The `pycyto qc` tests live in `tests/qc/`, mirroring the package: `conftest.py` builds synthetic GEX and CRISPR cyto runs (constants and writers in `helpers.py`); `test_parse.py`, `test_plots.py`, `test_report.py` cover modules, `test_gex.py` / `test_crispr.py` the end-to-end payload per workflow.
 
 Example configurations are available in `examples/`:
 

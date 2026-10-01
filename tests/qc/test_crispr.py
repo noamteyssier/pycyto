@@ -3,14 +3,14 @@
 import numpy as np
 import pytest
 
-from pycyto.qc import build_report, collect
+from pycyto.qc import Report
 
-from .qc_helpers import N_GUIDES, UNUSED_GUIDES
+from .helpers import N_GUIDES, UNUSED_GUIDES
 
 
 @pytest.fixture(scope="module")
 def payload(crispr_dir):
-    return collect(crispr_dir[0])
+    return Report.compute(crispr_dir[0]).payload()
 
 
 class TestCrispr:
@@ -49,7 +49,7 @@ class TestCrispr:
 
     def test_report(self, crispr_dir, tmp_path):
         out = str(tmp_path / "crispr.html")
-        build_report(crispr_dir[0], output=out)
+        Report.compute(crispr_dir[0]).write(out)
         html = open(out).read()
         assert "subtitle: \"cyto workflow crispr" in html and "Estimated number of cells" not in html
         assert html.rstrip().endswith("</html>") and "<script>main();</script>" in html

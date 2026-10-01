@@ -1,16 +1,16 @@
-"""``pycyto.qc.collect`` on a GEX run."""
+"""``pycyto.qc.Report`` on a GEX run."""
 
 import pytest
 
-from pycyto.qc import collect
+from pycyto.qc import Report
 
-from .qc_helpers import N_GENES
+from .helpers import N_GENES
 
 
 @pytest.fixture(scope="module")
 def payload(cyto_dir):
     root, _ = cyto_dir
-    return collect(root)
+    return Report.compute(root).payload()
 
 
 class TestCollect:

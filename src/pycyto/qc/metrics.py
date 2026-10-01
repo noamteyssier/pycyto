@@ -2,7 +2,7 @@
 
 Everything here is a transformation of a parsed :class:`~pycyto.qc.parse.CytoRun`.
 :class:`Metrics` (:class:`GexMetrics`, :class:`CrisprMetrics`) bundles the two for a run;
-``collect`` calls its ``compute``. Workflow subclasses of the metric models add their own
+``Report.compute`` calls its ``compute``. Workflow subclasses of the metric models add their own
 fields and override ``compute`` to build the base model and extend it:
 ``cls(**Base.compute(...).model_dump(), extra=...)``. Chart inputs live in
 :mod:`pycyto.qc.plots`, alert rules in :mod:`pycyto.qc.alerts`, cutoffs in
@@ -14,8 +14,15 @@ from typing import Self
 import numpy as np
 from pydantic import BaseModel, computed_field
 
-from ..config import FLEX_V2_BARCODE_RE
-from .parse import BarcodeReadStats, CellTable, CrisprCytoRun, CytoRun, GexCytoRun
+from .parse import (
+    BarcodeReadStats,
+    CellTable,
+    CrisprCytoRun,
+    CytoRun,
+    GexCytoRun,
+    GuideUmis,
+    Well,
+)
 from .thresholds import THRESH, Level
 
 
@@ -27,30 +34,6 @@ def safe_div(a, b) -> float | None:
 # ============================================================================
 # Shared
 # ============================================================================
-class Well(BaseModel):
-    """A Flex-V2 probe barcode's position on its 96-well plate, for the report's plate map.
-
-    Attributes
-    ----------
-    set : str
-        Probe set, ``A``-``D``; one plate each.
-    row : str
-        ``A``-``H``.
-    col : int
-        1-12.
-    """
-
-    set: str
-    row: str
-    col: int
-
-    @classmethod
-    def from_barcode(cls, barcode: str) -> Self | None:
-        """The well for a Flex-V2 barcode (``A-B07`` -> set A, row B, column 7); None for other formats."""
-        m = FLEX_V2_BARCODE_RE.match(barcode)
-        return cls(set=m[1], row=m[2], col=int(m[3])) if m else None
-
-
 class ProbeMetrics(BaseModel):
     """One row of the report's probe table: the metrics every workflow has per probe barcode.
 
@@ -180,7 +163,7 @@ class SummaryMetrics(BaseModel):
         """
         mapping = run.stats.mapping
         umi = run.stats.umi.entries.values()
-        mapped = sum(p.mapped_reads for p in probes)
+        mapped = run.stats.reads.mapped_reads
         return cls(
             cyto_outdir=run.path,
             total_reads=mapping.total_reads,
@@ -193,7 +176,7 @@ class SummaryMetrics(BaseModel):
             whitelist_size=run.stats.library.entries["whitelist"].total_elem,
             seq_saturation=1 - sum(p.umis for p in probes) / mapped if mapped else None,
             umi_corrected_frac=safe_div(sum(u.corrected for u in umi), sum(u.total for u in umi)),
-            mapping_sec=run.stats.timings["Mapping"],
+            mapping_sec=run.timings.mapping,
             n_inputs=len(run.stats.inputs),
         )
 
@@ -358,7 +341,7 @@ class GexSummaryMetrics(SummaryMetrics):
         counts = list(run.counts.values())
         called = [p for p in probes if p.cells > 0]
         cells_per_probe = np.array([p.cells for p in called], dtype=float)
-        mapped = sum(p.mapped_reads for p in probes)
+        mapped = run.stats.reads.mapped_reads
         n_cells = cells.height
         return cls(
             **base.model_dump(),
@@ -416,7 +399,8 @@ class CrisprProbeMetrics(ProbeMetrics):
     @classmethod
     def compute(cls, run: CrisprCytoRun, probe: str) -> Self:
         base = ProbeMetrics.compute(run, probe)
-        return cls(**base.model_dump(), guides_detected=int((run.guide_umis[probe] > 0).sum()))
+        umis = run.guide_umis_by_probe[probe][GuideUmis.umis]
+        return cls(**base.model_dump(), guides_detected=int((umis > 0).sum()))
 
 
 class CrisprSummaryMetrics(SummaryMetrics):
@@ -452,7 +436,7 @@ class CrisprSummaryMetrics(SummaryMetrics):
     @classmethod
     def compute(cls, run: CrisprCytoRun, probes: list[ProbeMetrics]) -> Self:
         base = SummaryMetrics.compute(run, probes)
-        totals = run.guide_totals
+        totals = run.guide_totals[GuideUmis.umis].to_numpy()
         p10, p90 = np.percentile(totals, [10, 90])
         return cls(
             **base.model_dump(),

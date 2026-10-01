@@ -14,7 +14,14 @@ from pydantic import BaseModel
 
 from ..config import FlexBarcode
 from .metrics import safe_div
-from .parse import BarcodeReadStats, CellTable, CrisprCytoRun, CytoRun, GexCytoRun
+from .parse import (
+    BarcodeReadStats,
+    CellTable,
+    CrisprCytoRun,
+    CytoRun,
+    GexCytoRun,
+    GuideUmis,
+)
 
 _LOG_EDGES = np.round(np.arange(0, 6.10, 0.05), 2)
 LOG_BINS = _LOG_EDGES[:-1]
@@ -122,8 +129,7 @@ class Plots(BaseModel):
         :data:`LOG_BINS`, so the report can label histogram axes.
     probes : dict[FlexBarcode, ProbePlots]
         Per-probe-barcode plots, in :attr:`CytoStats.probes` order. Holds the workflow's
-        :class:`ProbePlots` subclass; :func:`pycyto.qc.collect` dumps with
-        ``serialize_as_any`` so its extra fields reach the report.
+        :class:`ProbePlots` subclass; :meth:`pycyto.qc.Report.payload` dumps its extra fields.
     """
 
     log_bins: list[float] = LOG_BINS.tolist()
@@ -274,21 +280,22 @@ class CrisprPlots(Plots):
 
     @classmethod
     def compute(cls, run: CrisprCytoRun) -> Self:
-        totals = run.guide_totals
-        order = np.argsort(-totals, kind="stable")[:TOP_GUIDES]
-        total = totals.sum()
+        umis = pl.col(GuideUmis.umis)
+        detected = run.guide_totals.filter(umis > 0)
+        total = float(run.guide_totals[GuideUmis.umis].sum())
+        # ties keep var order: guide_totals is in var order and the sort is stable
+        top = detected.sort(GuideUmis.umis, descending=True, maintain_order=True).head(TOP_GUIDES)
 
         def probe_plots(probe: str) -> CrisprProbePlots:
-            umis = run.guide_umis[probe]
-            return CrisprProbePlots(curve=probe_rank_curve(run, probe), guide_hist=log_hist(umis[umis > 0]))
+            per_guide = run.guide_umis_by_probe[probe].filter(umis > 0)[GuideUmis.umis].to_numpy()
+            return CrisprProbePlots(curve=probe_rank_curve(run, probe), guide_hist=log_hist(per_guide))
 
         return cls(
             pooled=GuidePooled(
-                guide_hist=log_hist(totals[totals > 0]),
+                guide_hist=log_hist(detected[GuideUmis.umis].to_numpy()),
                 top_guides=[
-                    TopGuide(guide=run.guide_names[i], umis=int(totals[i]), frac=safe_div(float(totals[i]), float(total)))
-                    for i in order
-                    if totals[i] > 0
+                    TopGuide(guide=guide, umis=int(n), frac=safe_div(float(n), total))
+                    for guide, n in top.select(GuideUmis.guide, GuideUmis.umis).iter_rows()
                 ],
             ),
             probes={probe: probe_plots(probe) for probe in run.stats.probes},

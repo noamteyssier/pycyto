@@ -1,13 +1,13 @@
 """Synthetic cyto output directories for the ``pycyto qc`` tests.
 
-The GEX run (``cyto_dir``, see ``qc_helpers.PROBES``):
+The GEX run (``cyto_dir``, see ``helpers.PROBES``):
 
 * ``A-A01``: good probe barcode, CSR filtered h5ad
 * ``A-A02``: good probe barcode, CSC filtered h5ad
 * ``B-H12``: no cells (no filtered h5ad)
 * ``C-D07``: near-empty probe barcode (cells with only ~20 UMIs)
 
-The CRISPR run (``crispr_dir``, see ``qc_helpers.CRISPR_PROBES``) has three probe barcodes
+The CRISPR run (``crispr_dir``, see ``helpers.CRISPR_PROBES``) has three probe barcodes
 and a guide library where some guides never appear.
 """
 
@@ -21,7 +21,7 @@ import polars as pl
 import pytest
 import scipy.sparse as sp
 
-from .qc_helpers import (
+from .helpers import (
     CRISPR_PROBES,
     N_GENES,
     N_GUIDES,
