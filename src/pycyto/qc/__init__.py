@@ -38,7 +38,7 @@ def collect(cyto_outdir: str, title: str | None = None) -> dict:
         "generated": dt.datetime.now().isoformat(sep=" ", timespec="seconds"),
         "version": version("pycyto"),
         "summary": summary.model_dump(),
-        "alerts": [a.model_dump() for a in build_alerts(summary, probes, wf.alerts)],
+        "alerts": [a.model_dump() for a in build_alerts(summary, probes, wf.alert_rules)],
         "probes": [p.model_dump() for p in probes],
         "plots": wf.plots.compute(run).model_dump(),
     }

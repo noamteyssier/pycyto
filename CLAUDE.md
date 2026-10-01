@@ -33,7 +33,7 @@ uv pip install -e .
 - `aggregate.py` - Multi-modal sample aggregation logic
 - `convert.py` - Simple MTX to h5ad conversion utilities
 - `qc/` - Cell Ranger-style QC report for one cyto GEX or CRISPR output directory (`pycyto qc`)
-  - `parse.py` - Validated models (pydantic + pandera) for everything cyto writes: `CytoStats` (`stats/*.json`, `stats/reads`, `stats/umi`), `GexRun` / `CrisprRun` (stats plus the workflow's `counts/` h5ads). `Libraries.workflow` detects the workflow.
+  - `parse/` - Validated models (pydantic + pandera) for everything cyto writes: `stats.py` (`CytoStats` rooting `stats/*.json`, `stats/reads`, `stats/umi`; `Libraries.workflow` detects the workflow), `counts.py` (`scan_h5ad`, `FilteredCounts`, `CellTable`), `run.py` (`CytoRun` and `GexRun` / `CrisprRun`, stats plus the workflow's `counts/` h5ads). Everything public is re-exported from `qc.parse`.
   - `metrics.py` / `plots.py` - Shared `ProbeMetrics`, `SummaryMetrics`, `Plots` models with a `compute(run, ...)` classmethod; rank curves and histograms
   - `gex.py` / `crispr.py` - Workflow modules: subclasses of the shared models adding the workflow's fields, its alert rules, and a `WORKFLOW` bundle (`workflow.Workflow`)
   - `alerts.py` - `Alert`, thresholds (`THRESH`), the shared rules, and `build_alerts(summary, probes, rules)`

@@ -187,7 +187,7 @@ class GexPlots(Plots):
         return GexProbePlots(curve=probe_rank_curve(run, probe, cells["barcode"]), hists=CellHists.from_cells(cells))
 
 
-def alerts(summary: GexSummaryMetrics, probes: list[GexProbeMetrics], add: Adder) -> None:
+def alert_rules(summary: GexSummaryMetrics, probes: list[GexProbeMetrics], add: Adder) -> None:
     """GEX alert rules; see :func:`pycyto.qc.alerts.build_alerts`."""
     fr = summary.frac_reads_in_cells
     add(
@@ -236,4 +236,6 @@ def alerts(summary: GexSummaryMetrics, probes: list[GexProbeMetrics], add: Adder
     )
 
 
-WORKFLOW = Workflow(run=GexRun, probe_metrics=GexProbeMetrics, summary=GexSummaryMetrics, plots=GexPlots, alerts=alerts)
+WORKFLOW = Workflow(
+    run=GexRun, probe_metrics=GexProbeMetrics, summary=GexSummaryMetrics, plots=GexPlots, alert_rules=alert_rules
+)

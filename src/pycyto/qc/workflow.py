@@ -26,7 +26,7 @@ class Workflow:
         Run-level metrics model.
     plots : type[Plots]
         Chart inputs model.
-    alerts : Rules
+    alert_rules : Rules
         Workflow-specific alert rules, run after the shared ones.
     """
 
@@ -34,4 +34,4 @@ class Workflow:
     probe_metrics: type[ProbeMetrics]
     summary: type[SummaryMetrics]
     plots: type[Plots]
-    alerts: Rules
+    alert_rules: Rules

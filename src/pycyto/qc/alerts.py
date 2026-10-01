@@ -110,7 +110,7 @@ def build_alerts(summary: SummaryMetrics, probes: list[ProbeMetrics], rules: Rul
     probes : list[ProbeMetrics]
         One per probe barcode.
     rules : Rules
-        The workflow's rules, e.g. ``gex.alerts``.
+        The workflow's rules, e.g. ``gex.alert_rules``.
 
     Returns
     -------

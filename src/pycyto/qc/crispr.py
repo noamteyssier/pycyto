@@ -143,7 +143,7 @@ class CrisprPlots(Plots):
         return CrisprProbePlots(curve=probe_rank_curve(run, probe), guide_hist=log_hist(umis[umis > 0]))
 
 
-def alerts(summary: CrisprSummaryMetrics, probes: list[ProbeMetrics], add: Adder) -> None:
+def alert_rules(summary: CrisprSummaryMetrics, probes: list[ProbeMetrics], add: Adder) -> None:
     """CRISPR alert rules; see :func:`pycyto.qc.alerts.build_alerts`."""
     fd = summary.frac_guides_detected
     add(
@@ -162,4 +162,6 @@ def alerts(summary: CrisprSummaryMetrics, probes: list[ProbeMetrics], add: Adder
     )
 
 
-WORKFLOW = Workflow(run=CrisprRun, probe_metrics=ProbeMetrics, summary=CrisprSummaryMetrics, plots=CrisprPlots, alerts=alerts)
+WORKFLOW = Workflow(
+    run=CrisprRun, probe_metrics=ProbeMetrics, summary=CrisprSummaryMetrics, plots=CrisprPlots, alert_rules=alert_rules
+)
